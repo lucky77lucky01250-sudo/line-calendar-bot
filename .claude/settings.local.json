@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import sys,json; data=sys.stdin.read\\(\\); json.loads\\(data\\); print\\('valid JSON, length:', len\\(data\\)\\)\")",
+      "Bash(python3 *)",
+      "Read(//usr/local/bin/**)",
+      "Read(//opt/homebrew/**)",
+      "Read(//Users/ryu/.pyenv/**)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
