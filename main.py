@@ -1,6 +1,5 @@
 import os
 import logging
-from contextlib import asynccontextmanager
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -8,7 +7,6 @@ load_dotenv()
 
 import httpx
 import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from linebot.v3.webhook import WebhookParser
 from linebot.v3.webhooks import ImageMessageContent, MessageEvent, TextMessageContent
@@ -16,29 +14,27 @@ from linebot.v3.webhooks import ImageMessageContent, MessageEvent, TextMessageCo
 import calendar_service
 import line_service
 import nlp_parser
+import state_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 LINE_USER_ID = os.getenv("LINE_USER_ID", "")
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Tokyo")
 
 parser = WebhookParser(CHANNEL_SECRET)
-scheduler = BackgroundScheduler(timezone=pytz.timezone(TIMEZONE))
+app = FastAPI(title="LINE Calendar Bot")
 
-# 終日イベントの確認待ち状態を保持（user_id → 終日イベントリスト）
-pending_allday: dict[str, list[dict]] = {}
-
-# 画像から抽出した予定の確認待ち状態（user_id → イベントリスト）
-pending_calendar_events: dict[str, list[dict]] = {}
-
-# 見切れ予定の名前修正待ち状態（user_id → 修正待ちリスト）
-pending_truncated_fixes: dict[str, list[dict]] = {}
+# Redisのキー定数
+KEY_ALLDAY = "allday"
+KEY_CALENDAR = "calendar"
+KEY_TRUNCATED = "truncated"
 
 
 def send_morning_report():
-    """毎朝7時に実行される予定通知（今日・今週）"""
+    """朝の予定通知（今日・今週）"""
     try:
         logger.info("朝の予定通知を送信中...")
         report = calendar_service.build_daily_report()
@@ -48,16 +44,21 @@ def send_morning_report():
         logger.error(f"朝の予定通知エラー: {e}")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    scheduler.add_job(send_morning_report, "cron", hour=7, minute=0)
-    scheduler.start()
-    logger.info("スケジューラー起動: 毎朝7時に予定通知を送信します")
-    yield
-    scheduler.shutdown()
-
-
-app = FastAPI(title="LINE Calendar Bot", lifespan=lifespan)
+def _ask_next_truncated_fix(user_id: str):
+    """見切れ予定の修正を1件ずつ問い合わせる"""
+    fixes = state_store.get_state(KEY_TRUNCATED, user_id)
+    if not fixes:
+        state_store.del_state(KEY_TRUNCATED, user_id)
+        line_service.push_message(user_id, "✅ 全ての予定の修正が完了しました！")
+        return
+    fix = fixes[0]
+    time_label = "終日" if fix["time_str"] == "終日" else fix["time_str"]
+    line_service.push_message(
+        user_id,
+        f"✏️ 名前が見切れています\n「{fix['original_summary']}」\n"
+        f"({fix['date']} {time_label})\n\n"
+        f"正しい名前を入力してください。\n（スキップは「スキップ」）"
+    )
 
 
 def _process_calendar_image(message_id: str, user_id: str):
@@ -77,8 +78,7 @@ def _process_calendar_image(message_id: str, user_id: str):
             line_service.push_message(user_id, "📅 予定が見つかりませんでした。TimeTreeのカレンダー画面を送ってください。")
             return
 
-        # 確認待ちとして保存（まだ登録しない）
-        pending_calendar_events[user_id] = events
+        state_store.set_state(KEY_CALENDAR, user_id, events)
 
         truncated_count = sum(1 for e in events if e.get("truncated"))
         lines = [f"📅 {len(events)}件の予定を検出しました。\n内容を確認して「はい」で登録、「キャンセル」で中止してください。\n"]
@@ -100,26 +100,10 @@ def _process_calendar_image(message_id: str, user_id: str):
         line_service.push_message(user_id, "画像の解析に失敗しました。TimeTreeのカレンダー画面を送ってください。")
 
 
-def _ask_next_truncated_fix(user_id: str):
-    """見切れ予定の修正を1件ずつ問い合わせる"""
-    fixes = pending_truncated_fixes.get(user_id, [])
-    if not fixes:
-        pending_truncated_fixes.pop(user_id, None)
-        line_service.push_message(user_id, "✅ 全ての予定の修正が完了しました！")
-        return
-    fix = fixes[0]
-    time_label = "終日" if fix["time_str"] == "終日" else fix["time_str"]
-    line_service.push_message(
-        user_id,
-        f"✏️ 名前が見切れています\n「{fix['original_summary']}」\n"
-        f"({fix['date']} {time_label})\n\n"
-        f"正しい名前を入力してください。\n（スキップは「スキップ」）"
-    )
-
-
 def _register_pending_events(user_id: str, reply_token: str):
     """確認済みの予定をGoogleカレンダーに一括登録し、見切れ予定の修正フローを開始"""
-    events = pending_calendar_events.pop(user_id, [])
+    events = state_store.get_state(KEY_CALENDAR, user_id)
+    state_store.del_state(KEY_CALENDAR, user_id)
     if not events:
         line_service.reply_message(reply_token, "登録する予定がありません。")
         return
@@ -154,13 +138,23 @@ def _register_pending_events(user_id: str, reply_token: str):
     line_service.reply_message(reply_token, "\n".join(lines))
 
     if truncated_fixes:
-        pending_truncated_fixes[user_id] = truncated_fixes
+        state_store.set_state(KEY_TRUNCATED, user_id, truncated_fixes)
         _ask_next_truncated_fix(user_id)
 
 
 @app.get("/")
 async def health_check():
     return {"status": "ok", "message": "LINE Calendar Bot is running"}
+
+
+@app.post("/cron/morning-report")
+async def cron_morning_report(request: Request):
+    """Railway Cronから7時に呼び出される朝の通知エンドポイント"""
+    auth = request.headers.get("Authorization", "")
+    if not CRON_SECRET or auth != f"Bearer {CRON_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    send_morning_report()
+    return {"status": "ok"}
 
 
 @app.post("/webhook")
@@ -197,8 +191,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         logger.info(f"受信メッセージ: {user_text}")
 
         # 見切れ予定の名前修正
-        if user_id in pending_truncated_fixes:
-            fixes = pending_truncated_fixes[user_id]
+        if state_store.has_state(KEY_TRUNCATED, user_id):
+            fixes = state_store.get_state(KEY_TRUNCATED, user_id)
             if fixes:
                 fix = fixes.pop(0)
                 if user_text not in ("スキップ", "skip"):
@@ -211,25 +205,25 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 else:
                     line_service.reply_message(reply_token, "スキップしました。")
                 if fixes:
-                    pending_truncated_fixes[user_id] = fixes
+                    state_store.set_state(KEY_TRUNCATED, user_id, fixes)
                     _ask_next_truncated_fix(user_id)
                 else:
-                    pending_truncated_fixes.pop(user_id, None)
+                    state_store.del_state(KEY_TRUNCATED, user_id)
                     line_service.push_message(user_id, "✅ 全ての予定の修正が完了しました！")
             continue
 
         # 画像解析後の確認待ち処理
-        if user_id in pending_calendar_events:
+        if state_store.has_state(KEY_CALENDAR, user_id):
             if user_text in ("はい", "yes", "YES", "登録", "OK", "ok"):
                 _register_pending_events(user_id, reply_token)
                 continue
             elif user_text in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
-                pending_calendar_events.pop(user_id, None)
+                state_store.del_state(KEY_CALENDAR, user_id)
                 line_service.reply_message(reply_token, "キャンセルしました。")
                 continue
 
         # 保留中の終日イベントを取得（あれば意図判定に渡す）
-        user_pending = pending_allday.get(user_id)
+        user_pending = state_store.get_state(KEY_ALLDAY, user_id) or None
 
         try:
             parsed = nlp_parser.parse_intent(user_text, pending_allday_events=user_pending)
@@ -252,14 +246,13 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 new_start = datetime.strptime(f"{date_str} {start_time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
                 new_end = datetime.strptime(f"{date_str} {end_time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
 
-                # 対象イベントを名前で検索
                 target_event = next(
                     (e for e in user_pending if target_summary in e.get("summary", "")),
-                    user_pending[0],  # 1件のみの場合はそのまま使用
+                    user_pending[0],
                 )
 
                 calendar_service.update_event_time(target_event["id"], new_start, new_end)
-                pending_allday.pop(user_id, None)  # 保留クリア
+                state_store.del_state(KEY_ALLDAY, user_id)
 
                 reply_text = (
                     f"✅ 予定を更新しました！\n"
@@ -280,11 +273,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 duration = int(parsed.get("duration_minutes", 60))
                 result, allday_events = calendar_service.check_availability(target_dt, duration)
 
-                # 終日イベントがあれば保留状態に保存
                 if allday_events:
-                    pending_allday[user_id] = allday_events
+                    state_store.set_state(KEY_ALLDAY, user_id, allday_events)
                 else:
-                    pending_allday.pop(user_id, None)
+                    state_store.del_state(KEY_ALLDAY, user_id)
 
                 line_service.reply_message(reply_token, result)
             except Exception as e:
