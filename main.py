@@ -33,6 +33,9 @@ pending_allday: dict[str, list[dict]] = {}
 # 画像から抽出した予定の確認待ち状態（user_id → イベントリスト）
 pending_calendar_events: dict[str, list[dict]] = {}
 
+# 見切れ予定の名前修正待ち状態（user_id → 修正待ちリスト）
+pending_truncated_fixes: dict[str, list[dict]] = {}
+
 
 def send_morning_report():
     """毎朝7時に実行される予定通知（今日・今週）"""
@@ -97,8 +100,25 @@ def _process_calendar_image(message_id: str, user_id: str):
         line_service.push_message(user_id, "画像の解析に失敗しました。TimeTreeのカレンダー画面を送ってください。")
 
 
+def _ask_next_truncated_fix(user_id: str):
+    """見切れ予定の修正を1件ずつ問い合わせる"""
+    fixes = pending_truncated_fixes.get(user_id, [])
+    if not fixes:
+        pending_truncated_fixes.pop(user_id, None)
+        line_service.push_message(user_id, "✅ 全ての予定の修正が完了しました！")
+        return
+    fix = fixes[0]
+    time_label = "終日" if fix["time_str"] == "終日" else fix["time_str"]
+    line_service.push_message(
+        user_id,
+        f"✏️ 名前が見切れています\n「{fix['original_summary']}」\n"
+        f"({fix['date']} {time_label})\n\n"
+        f"正しい名前を入力してください。\n（スキップは「スキップ」）"
+    )
+
+
 def _register_pending_events(user_id: str, reply_token: str):
-    """確認済みの予定をGoogleカレンダーに一括登録"""
+    """確認済みの予定をGoogleカレンダーに一括登録し、見切れ予定の修正フローを開始"""
     events = pending_calendar_events.pop(user_id, [])
     if not events:
         line_service.reply_message(reply_token, "登録する予定がありません。")
@@ -106,15 +126,24 @@ def _register_pending_events(user_id: str, reply_token: str):
 
     tz = pytz.timezone(TIMEZONE)
     added, failed = [], []
+    truncated_fixes = []
+
     for e in events:
         try:
             if e.get("all_day"):
-                calendar_service.create_allday_event(e["summary"], e["date"])
+                result = calendar_service.create_allday_event(e["summary"], e["date"])
             else:
                 start_dt = datetime.strptime(f"{e['date']} {e['start_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
                 end_dt = datetime.strptime(f"{e['date']} {e['end_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
-                calendar_service.create_event(e["summary"], start_dt, end_dt)
+                result = calendar_service.create_event(e["summary"], start_dt, end_dt)
             added.append(e)
+            if e.get("truncated"):
+                truncated_fixes.append({
+                    "event_id": result["id"],
+                    "original_summary": e["summary"],
+                    "date": e["date"],
+                    "time_str": "終日" if e.get("all_day") else e.get("start_time", ""),
+                })
         except Exception as ex:
             logger.error(f"イベント登録失敗: {e.get('summary')} - {ex}")
             failed.append(e)
@@ -123,6 +152,10 @@ def _register_pending_events(user_id: str, reply_token: str):
     if failed:
         lines.append(f"⚠️ {len(failed)}件の登録に失敗しました")
     line_service.reply_message(reply_token, "\n".join(lines))
+
+    if truncated_fixes:
+        pending_truncated_fixes[user_id] = truncated_fixes
+        _ask_next_truncated_fix(user_id)
 
 
 @app.get("/")
@@ -162,6 +195,28 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         user_id = event.source.user_id
 
         logger.info(f"受信メッセージ: {user_text}")
+
+        # 見切れ予定の名前修正
+        if user_id in pending_truncated_fixes:
+            fixes = pending_truncated_fixes[user_id]
+            if fixes:
+                fix = fixes.pop(0)
+                if user_text not in ("スキップ", "skip"):
+                    try:
+                        calendar_service.update_event_summary(fix["event_id"], user_text)
+                        line_service.reply_message(reply_token, f"✅ 「{user_text}」に更新しました")
+                    except Exception as ex:
+                        logger.error(f"イベント名更新エラー: {ex}")
+                        line_service.reply_message(reply_token, "更新に失敗しました。スキップします。")
+                else:
+                    line_service.reply_message(reply_token, "スキップしました。")
+                if fixes:
+                    pending_truncated_fixes[user_id] = fixes
+                    _ask_next_truncated_fix(user_id)
+                else:
+                    pending_truncated_fixes.pop(user_id, None)
+                    line_service.push_message(user_id, "✅ 全ての予定の修正が完了しました！")
+            continue
 
         # 画像解析後の確認待ち処理
         if user_id in pending_calendar_events:

@@ -193,6 +193,14 @@ def check_availability(target_dt: datetime, duration_minutes: int = 60) -> tuple
     return "\n".join(lines), allday_events
 
 
+def update_event_summary(event_id: str, new_summary: str) -> dict:
+    """イベントのタイトルを更新する"""
+    service = _get_service()
+    return service.events().patch(
+        calendarId=CALENDAR_ID, eventId=event_id, body={"summary": new_summary}
+    ).execute()
+
+
 def update_event_time(event_id: str, new_start: datetime, new_end: datetime) -> dict:
     """終日イベントを時間指定イベントに更新する"""
     service = _get_service()
