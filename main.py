@@ -30,6 +30,9 @@ scheduler = BackgroundScheduler(timezone=pytz.timezone(TIMEZONE))
 # 終日イベントの確認待ち状態を保持（user_id → 終日イベントリスト）
 pending_allday: dict[str, list[dict]] = {}
 
+# 画像から抽出した予定の確認待ち状態（user_id → イベントリスト）
+pending_calendar_events: dict[str, list[dict]] = {}
+
 
 def send_morning_report():
     """毎朝7時に実行される予定通知（今日・今週）"""
@@ -55,10 +58,10 @@ app = FastAPI(title="LINE Calendar Bot", lifespan=lifespan)
 
 
 def _process_calendar_image(message_id: str, user_id: str):
-    """カレンダー画像を解析してGoogleカレンダーに一括登録（バックグラウンド実行）"""
+    """カレンダー画像を解析し確認メッセージを送信（バックグラウンド実行）"""
     try:
         token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=60) as client:
             resp = client.get(
                 f"https://api-data.line.me/v2/bot/message/{message_id}/content",
                 headers={"Authorization": f"Bearer {token}"},
@@ -71,37 +74,51 @@ def _process_calendar_image(message_id: str, user_id: str):
             line_service.push_message(user_id, "📅 予定が見つかりませんでした。TimeTreeのカレンダー画面を送ってください。")
             return
 
-        tz = pytz.timezone(TIMEZONE)
-        added, failed = [], []
-        for e in events:
-            try:
-                if e.get("all_day"):
-                    calendar_service.create_allday_event(e["summary"], e["date"])
-                else:
-                    start_dt = datetime.strptime(f"{e['date']} {e['start_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
-                    end_dt = datetime.strptime(f"{e['date']} {e['end_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
-                    calendar_service.create_event(e["summary"], start_dt, end_dt)
-                added.append(e)
-            except Exception as ex:
-                logger.error(f"イベント登録失敗: {e.get('summary')} - {ex}")
-                failed.append(e)
+        # 確認待ちとして保存（まだ登録しない）
+        pending_calendar_events[user_id] = events
 
-        lines = [f"✅ {len(added)}件の予定をGoogleカレンダーに登録しました！\n"]
-        for e in added[:15]:
+        lines = [f"📅 {len(events)}件の予定を検出しました。\n内容を確認して「はい」で登録、「キャンセル」で中止してください。\n"]
+        for e in events[:20]:
             if e.get("all_day"):
-                lines.append(f"📌 {e['date']} {e['summary']}（終日）")
+                lines.append(f"・{e['date']} {e['summary']}（終日）")
             else:
-                lines.append(f"📌 {e['date']} {e['start_time']} {e['summary']}")
-        if len(added) > 15:
-            lines.append(f"...他 {len(added) - 15} 件")
-        if failed:
-            lines.append(f"\n⚠️ {len(failed)}件の登録に失敗しました")
+                lines.append(f"・{e['date']} {e['start_time']} {e['summary']}")
+        if len(events) > 20:
+            lines.append(f"...他 {len(events) - 20} 件")
 
         line_service.push_message(user_id, "\n".join(lines))
 
     except Exception as e:
         logger.error(f"カレンダー画像処理エラー: {e}")
         line_service.push_message(user_id, "画像の解析に失敗しました。TimeTreeのカレンダー画面を送ってください。")
+
+
+def _register_pending_events(user_id: str, reply_token: str):
+    """確認済みの予定をGoogleカレンダーに一括登録"""
+    events = pending_calendar_events.pop(user_id, [])
+    if not events:
+        line_service.reply_message(reply_token, "登録する予定がありません。")
+        return
+
+    tz = pytz.timezone(TIMEZONE)
+    added, failed = [], []
+    for e in events:
+        try:
+            if e.get("all_day"):
+                calendar_service.create_allday_event(e["summary"], e["date"])
+            else:
+                start_dt = datetime.strptime(f"{e['date']} {e['start_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+                end_dt = datetime.strptime(f"{e['date']} {e['end_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+                calendar_service.create_event(e["summary"], start_dt, end_dt)
+            added.append(e)
+        except Exception as ex:
+            logger.error(f"イベント登録失敗: {e.get('summary')} - {ex}")
+            failed.append(e)
+
+    lines = [f"✅ {len(added)}件の予定をGoogleカレンダーに登録しました！"]
+    if failed:
+        lines.append(f"⚠️ {len(failed)}件の登録に失敗しました")
+    line_service.reply_message(reply_token, "\n".join(lines))
 
 
 @app.get("/")
@@ -141,6 +158,16 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         user_id = event.source.user_id
 
         logger.info(f"受信メッセージ: {user_text}")
+
+        # 画像解析後の確認待ち処理
+        if user_id in pending_calendar_events:
+            if user_text in ("はい", "yes", "YES", "登録", "OK", "ok"):
+                _register_pending_events(user_id, reply_token)
+                continue
+            elif user_text in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
+                pending_calendar_events.pop(user_id, None)
+                line_service.reply_message(reply_token, "キャンセルしました。")
+                continue
 
         # 保留中の終日イベントを取得（あれば意図判定に渡す）
         user_pending = pending_allday.get(user_id)
