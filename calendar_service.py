@@ -1,8 +1,9 @@
+from __future__ import annotations
 import os
-import json
 from datetime import datetime, timedelta
 import pytz
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Tokyo")
@@ -11,21 +12,30 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
 def _get_service():
-    credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if not credentials_json:
-        raise ValueError("GOOGLE_CREDENTIALS_JSON が設定されていません")
-    credentials_info = json.loads(credentials_json)
-    credentials = service_account.Credentials.from_service_account_info(
-        credentials_info, scopes=SCOPES
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+
+    if not all([client_id, client_secret, refresh_token]):
+        raise ValueError("GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN が設定されていません")
+
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=SCOPES,
     )
-    return build("calendar", "v3", credentials=credentials)
+    creds.refresh(Request())
+    return build("calendar", "v3", credentials=creds)
 
 
 def _jst_now():
     return datetime.now(pytz.timezone(TIMEZONE))
 
 
-def get_events(start_dt: datetime, end_dt: datetime) -> list[dict]:
+def get_events(start_dt: datetime, end_dt: datetime, filter_by_start: bool = False) -> list[dict]:
     service = _get_service()
     result = service.events().list(
         calendarId=CALENDAR_ID,
@@ -34,40 +44,45 @@ def get_events(start_dt: datetime, end_dt: datetime) -> list[dict]:
         singleEvents=True,
         orderBy="startTime",
     ).execute()
-    return result.get("items", [])
+    events = result.get("items", [])
+    if filter_by_start:
+        tz = pytz.timezone(TIMEZONE)
+        filtered = []
+        for e in events:
+            if _is_allday(e):
+                # 終日イベントは date フィールドで判定
+                event_date = e["start"]["date"]
+                if start_dt.strftime("%Y-%m-%d") <= event_date < end_dt.strftime("%Y-%m-%d"):
+                    filtered.append(e)
+            else:
+                event_start = datetime.fromisoformat(e["start"]["dateTime"])
+                if start_dt <= event_start < end_dt:
+                    filtered.append(e)
+        return filtered
+    return events
+
+
+def _is_allday(event: dict) -> bool:
+    return "date" in event["start"] and "dateTime" not in event["start"]
 
 
 def _format_event(event: dict) -> str:
-    start = event["start"].get("dateTime", event["start"].get("date", ""))
-    if "T" in start:
-        dt = datetime.fromisoformat(start)
-        time_str = dt.strftime("%H:%M")
-    else:
-        time_str = "終日"
+    if _is_allday(event):
+        return f"  終日 {event.get('summary', '(タイトルなし)')}（詳細要確認）"
+    dt = datetime.fromisoformat(event["start"]["dateTime"])
+    time_str = dt.strftime("%H:%M")
     return f"  {time_str} {event.get('summary', '(タイトルなし)')}"
 
 
-def _week_range(weeks_ahead: int, now: datetime) -> tuple[datetime, datetime]:
-    """weeks_ahead週後の月曜〜日曜を返す"""
-    tz = pytz.timezone(TIMEZONE)
-    days_to_monday = now.weekday()
-    this_monday = now - timedelta(days=days_to_monday)
-    start = (this_monday + timedelta(weeks=weeks_ahead)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    end = start + timedelta(days=7)
-    return start.astimezone(tz), end.astimezone(tz)
-
-
 def build_daily_report() -> str:
+    """朝の自動通知用：今日・今週の予定"""
     tz = pytz.timezone(TIMEZONE)
     now = _jst_now()
     lines = []
 
-    # 今日の予定
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
-    today_events = get_events(today_start, today_end)
+    today_events = get_events(today_start, today_end, filter_by_start=True)
     lines.append(f"📅 【今日の予定】{now.strftime('%m/%d(%a)')}")
     if today_events:
         lines.extend([_format_event(e) for e in today_events])
@@ -75,15 +90,18 @@ def build_daily_report() -> str:
         lines.append("  予定なし")
     lines.append("")
 
-    # 今週の予定（今日以降〜日曜）
-    week_end_start, week_end_end = _week_range(0, now)
-    week_events = get_events(now, week_end_end)
-    lines.append(f"📆 【今週の残り予定】〜{week_end_end.strftime('%m/%d')}")
+    days_to_sunday = 6 - now.weekday()
+    week_end = (now + timedelta(days=days_to_sunday)).replace(
+        hour=23, minute=59, second=59, microsecond=0
+    )
+    tomorrow_start = today_end
+    week_events = get_events(tomorrow_start, week_end)
+    lines.append(f"📆 【今週の残り予定】〜{week_end.strftime('%m/%d(%a)')}")
     if week_events:
         prev_date = None
         for e in week_events:
-            start = e["start"].get("dateTime", e["start"].get("date", ""))
-            date_str = start[:10]
+            start_val = e["start"].get("dateTime", e["start"].get("date", ""))
+            date_str = start_val[:10]
             if date_str != prev_date:
                 dt = datetime.fromisoformat(date_str)
                 lines.append(f"  {dt.strftime('%m/%d(%a)')}")
@@ -93,20 +111,39 @@ def build_daily_report() -> str:
         lines.append("  予定なし")
     lines.append("")
 
-    # 2〜4週間後の予定
-    labels = ["2週間後", "3週間後", "4週間後"]
-    emojis = ["🗓", "🗓", "🗓"]
-    for i, (label, emoji) in enumerate(zip(labels, emojis), start=2):
-        wk_start, wk_end = _week_range(i, now)
-        events = get_events(wk_start, wk_end)
-        lines.append(
-            f"{emoji} 【{label}の予定】{wk_start.strftime('%m/%d')}〜{wk_end.strftime('%m/%d')}"
+    lines.append("📌 予定を追加するには「日時 タイトル」で送ってください")
+    lines.append("例：5/20 15時 田中さんとMTG 1時間")
+    return "\n".join(lines)
+
+
+def build_query_report(period: str) -> str:
+    """ユーザーの問い合わせ用：today または week"""
+    tz = pytz.timezone(TIMEZONE)
+    now = _jst_now()
+    lines = []
+
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
+
+    if period == "today":
+        events = get_events(today_start, today_end, filter_by_start=True)
+        lines.append(f"📅 【今日の予定】{now.strftime('%m/%d(%a)')}")
+        if events:
+            lines.extend([_format_event(e) for e in events])
+        else:
+            lines.append("  予定なし")
+    else:
+        days_to_sunday = 6 - now.weekday()
+        week_end = (now + timedelta(days=days_to_sunday)).replace(
+            hour=23, minute=59, second=59, microsecond=0
         )
+        events = get_events(today_start, week_end)
+        lines.append(f"📆 【今週の予定】〜{week_end.strftime('%m/%d(%a)')}")
         if events:
             prev_date = None
             for e in events:
-                start = e["start"].get("dateTime", e["start"].get("date", ""))
-                date_str = start[:10]
+                start_val = e["start"].get("dateTime", e["start"].get("date", ""))
+                date_str = start_val[:10]
                 if date_str != prev_date:
                     dt = datetime.fromisoformat(date_str)
                     lines.append(f"  {dt.strftime('%m/%d(%a)')}")
@@ -114,11 +151,57 @@ def build_daily_report() -> str:
                 lines.append(f"    {_format_event(e).strip()}")
         else:
             lines.append("  予定なし")
-        lines.append("")
 
-    lines.append("📌 予定を追加するには「日時 タイトル」で送ってください")
-    lines.append("例：5/20 15時 田中さんとMTG 1時間")
     return "\n".join(lines)
+
+
+def check_availability(target_dt: datetime, duration_minutes: int = 60) -> tuple[str, list[dict]]:
+    """
+    指定時間帯の空き確認。
+    戻り値: (返信メッセージ, 終日イベントのリスト)
+    終日イベントは後から時間更新できるよう呼び出し元で保持する。
+    """
+    end_dt = target_dt + timedelta(minutes=duration_minutes)
+    events = get_events(target_dt, end_dt)
+
+    time_str = target_dt.strftime("%m/%d(%a) %H:%M")
+    end_str = end_dt.strftime("%H:%M")
+
+    if not events:
+        return f"✅ {time_str}〜{end_str} は空いています！", []
+
+    allday_events = [e for e in events if _is_allday(e)]
+    timed_events = [e for e in events if not _is_allday(e)]
+
+    lines = [f"🗓 {time_str}〜{end_str} の状況："]
+
+    if timed_events:
+        lines.append("⛔ 以下の予定が入っています：")
+        for e in timed_events:
+            dt = datetime.fromisoformat(e["start"]["dateTime"])
+            end = datetime.fromisoformat(e["end"]["dateTime"])
+            lines.append(f"  {dt.strftime('%H:%M')}〜{end.strftime('%H:%M')} {e.get('summary', '(タイトルなし)')}")
+
+    if allday_events:
+        lines.append("⚠️ 終日予定あり（詳細要確認）：")
+        for e in allday_events:
+            lines.append(f"  📌 {e.get('summary', '(タイトルなし)')}")
+        lines.append("")
+        lines.append("時間帯を教えてもらえれば更新します。")
+        lines.append("例：「〇〇 14時〜16時」")
+
+    return "\n".join(lines), allday_events
+
+
+def update_event_time(event_id: str, new_start: datetime, new_end: datetime) -> dict:
+    """終日イベントを時間指定イベントに更新する"""
+    service = _get_service()
+    tz = pytz.timezone(TIMEZONE)
+    body = {
+        "start": {"dateTime": new_start.astimezone(tz).isoformat(), "timeZone": TIMEZONE},
+        "end": {"dateTime": new_end.astimezone(tz).isoformat(), "timeZone": TIMEZONE},
+    }
+    return service.events().patch(calendarId=CALENDAR_ID, eventId=event_id, body=body).execute()
 
 
 def create_event(summary: str, start_dt: datetime, end_dt: datetime, description: str = "") -> dict:
