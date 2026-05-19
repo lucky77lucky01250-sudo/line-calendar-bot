@@ -74,6 +74,22 @@ def parse_intent(text: str, pending_allday_events: list[dict] | None = None) -> 
   "duration_minutes": 60
 }}
 
+【予定削除の場合】
+{{
+  "intent": "event_deletion",
+  "summary": "削除したい予定名のキーワード",
+  "date": "YYYY-MM-DD"
+}}
+
+【予定変更の場合】
+{{
+  "intent": "event_update",
+  "summary": "変更したい予定名のキーワード",
+  "date": "YYYY-MM-DD",
+  "start_time": "HH:MM",
+  "end_time": "HH:MM"
+}}
+
 【判定不能の場合】
 {{
   "intent": "unknown"
@@ -83,6 +99,8 @@ def parse_intent(text: str, pending_allday_events: list[dict] | None = None) -> 
 - 「空いてる？」「空き時間は？」「〇時は？」→ availability_check
 - 「今日の予定」「今週は？」「スケジュール」→ schedule_query
 - 日時＋タイトルを含む → event_creation
+- 「〇〇を削除して」「〇〇を消して」「〇〇をキャンセル」→ event_deletion（dateは指定があれば変換、なければ空文字）
+- 「〇〇を〇時に変更」「〇〇を明日に変更」→ event_update（変更しない項目は空文字）
 - 相対日付（明日・来週など）は今日({now.strftime('%Y-%m-%d')})を基準に絶対日付へ変換
 - duration_minutesが不明な場合は60
 - target_datetimeの時間が不明な場合はそのまま記載せずperiodで返す"""

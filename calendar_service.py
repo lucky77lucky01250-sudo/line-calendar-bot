@@ -193,6 +193,83 @@ def check_availability(target_dt: datetime, duration_minutes: int = 60) -> tuple
     return "\n".join(lines), allday_events
 
 
+def search_events_by_keyword(keyword: str, date_str: str | None = None) -> list[dict]:
+    """キーワードでイベントを検索する（前後60日）"""
+    service = _get_service()
+    tz = pytz.timezone(TIMEZONE)
+    now = _jst_now()
+    if date_str:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        search_start = tz.localize(d.replace(hour=0, minute=0, second=0, microsecond=0))
+        search_end = search_start + timedelta(days=1)
+    else:
+        search_start = now - timedelta(days=7)
+        search_end = now + timedelta(days=60)
+    result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=search_start.isoformat(),
+        timeMax=search_end.isoformat(),
+        singleEvents=True,
+        orderBy="startTime",
+        q=keyword,
+    ).execute()
+    return result.get("items", [])
+
+
+def delete_event(event_id: str) -> None:
+    service = _get_service()
+    service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
+
+
+def update_event_datetime(
+    event_id: str,
+    new_date: str | None = None,
+    new_start_time: str | None = None,
+    new_end_time: str | None = None,
+) -> dict:
+    """イベントの日時を更新する。終日イベントの日付変更も対応"""
+    service = _get_service()
+    tz = pytz.timezone(TIMEZONE)
+    current = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+    all_day = _is_allday(current)
+
+    if all_day:
+        target_date = new_date or current["start"]["date"]
+        d = datetime.strptime(target_date, "%Y-%m-%d")
+        body = {
+            "start": {"date": target_date},
+            "end": {"date": (d + timedelta(days=1)).strftime("%Y-%m-%d")},
+        }
+    else:
+        cur_start = datetime.fromisoformat(current["start"]["dateTime"])
+        cur_end = datetime.fromisoformat(current["end"]["dateTime"])
+        base_date = new_date or cur_start.strftime("%Y-%m-%d")
+
+        if new_start_time:
+            upd_start = tz.localize(
+                datetime.strptime(f"{base_date} {new_start_time}", "%Y-%m-%d %H:%M")
+            )
+        else:
+            upd_start = tz.localize(
+                datetime.strptime(f"{base_date} {cur_start.strftime('%H:%M')}", "%Y-%m-%d %H:%M")
+            )
+
+        if new_end_time:
+            upd_end = tz.localize(
+                datetime.strptime(f"{base_date} {new_end_time}", "%Y-%m-%d %H:%M")
+            )
+        else:
+            duration = cur_end - cur_start
+            upd_end = upd_start + duration
+
+        body = {
+            "start": {"dateTime": upd_start.astimezone(tz).isoformat(), "timeZone": TIMEZONE},
+            "end": {"dateTime": upd_end.astimezone(tz).isoformat(), "timeZone": TIMEZONE},
+        }
+
+    return service.events().patch(calendarId=CALENDAR_ID, eventId=event_id, body=body).execute()
+
+
 def update_event_summary(event_id: str, new_summary: str) -> dict:
     """イベントのタイトルを更新する"""
     service = _get_service()
