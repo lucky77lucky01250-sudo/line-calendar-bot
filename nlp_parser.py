@@ -117,13 +117,16 @@ def parse_schedule_text(text: str) -> dict | None:
   "summary": "予定のタイトル",
   "date": "YYYY-MM-DD",
   "start_time": "HH:MM",
-  "duration_minutes": 60
+  "end_time": "HH:MM"
 }}
 
-解析できない場合は null を返してください。
-日付が「明日」「来週」などの相対表現の場合は今日({now.strftime('%Y-%m-%d')})を基準に計算してください。
-時間が不明の場合は "09:00" をデフォルトにしてください。
-所要時間が不明の場合は 60 をデフォルトにしてください。"""
+ルール:
+- 解析できない場合は null を返す
+- 日付が「明日」「来週」など相対表現の場合は今日({now.strftime('%Y-%m-%d')})を基準に計算
+- 「19時から22時まで」のように終了時刻が明示されている場合はそのまま使う
+- 「1時間」「30分」のように所要時間が書かれている場合は start_time + 所要時間 = end_time として計算
+- 終了時刻も所要時間も不明な場合は end_time = start_time + 1時間
+- 開始時刻が不明な場合は "09:00" をデフォルトにする"""
 
     message = client.messages.create(
         model="claude-haiku-4-5-20251001",
@@ -143,7 +146,11 @@ def parse_schedule_text(text: str) -> dict | None:
     start_dt = datetime.strptime(
         f"{data['date']} {data['start_time']}", "%Y-%m-%d %H:%M"
     ).replace(tzinfo=tz)
-    end_dt = start_dt + timedelta(minutes=int(data["duration_minutes"]))
+    end_dt = datetime.strptime(
+        f"{data['date']} {data['end_time']}", "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=tz)
+    if end_dt <= start_dt:
+        end_dt = start_dt + timedelta(hours=1)
 
     return {
         "summary": data["summary"],
