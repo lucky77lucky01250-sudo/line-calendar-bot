@@ -204,6 +204,18 @@ def update_event_time(event_id: str, new_start: datetime, new_end: datetime) -> 
     return service.events().patch(calendarId=CALENDAR_ID, eventId=event_id, body=body).execute()
 
 
+def create_allday_event(summary: str, date_str: str, description: str = "") -> dict:
+    """終日イベントを作成する"""
+    service = _get_service()
+    event = {
+        "summary": summary,
+        "description": description,
+        "start": {"date": date_str},
+        "end": {"date": date_str},
+    }
+    return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
+
+
 def create_event(summary: str, start_dt: datetime, end_dt: datetime, description: str = "") -> dict:
     service = _get_service()
     tz = pytz.timezone(TIMEZONE)

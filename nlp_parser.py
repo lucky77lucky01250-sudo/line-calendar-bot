@@ -1,4 +1,5 @@
 from __future__ import annotations
+import base64
 import os
 import json
 import re
@@ -149,3 +150,51 @@ def parse_schedule_text(text: str) -> dict | None:
         "start": start_dt,
         "end": end_dt,
     }
+
+
+def parse_calendar_image(image_data: bytes, media_type: str = "image/jpeg") -> list[dict]:
+    """
+    カレンダー画像から今日以降の予定を抽出する。
+    戻り値: [{"summary": str, "date": "YYYY-MM-DD", "start_time": str, "end_time": str, "all_day": bool}]
+    """
+    tz = pytz.timezone(TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    image_b64 = base64.b64encode(image_data).decode("utf-8")
+
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=4096,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": media_type, "data": image_b64}
+                },
+                {
+                    "type": "text",
+                    "text": f"""このTimeTreeカレンダー画像から{today}以降の予定を全て抽出してください。
+
+JSON配列のみを返してください（コードブロック不要、余分なテキスト不要）:
+[
+  {{"summary": "予定名", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "all_day": false}},
+  {{"summary": "終日予定名", "date": "YYYY-MM-DD", "start_time": "", "end_time": "", "all_day": true}}
+]
+
+ルール:
+- {today}より前の予定は含めない
+- 終日予定・複数日イベントはall_day: true、start_time・end_timeは空文字
+- 時刻不明な通常予定の終了時刻は開始の1時間後
+- 複数日にまたがる予定は開始日のみ登録
+- 祝日・六曜（先勝・友引・先負・仏滅・大安・赤口）は除外
+- 表示されている全イベントを漏らさず抽出"""
+                }
+            ]
+        }]
+    )
+
+    response_text = message.content[0].text.strip()
+    response_text = re.sub(r'^```(?:json)?\s*', '', response_text)
+    response_text = re.sub(r'\s*```$', '', response_text).strip()
+    return json.loads(response_text)
