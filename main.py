@@ -77,14 +77,18 @@ def _process_calendar_image(message_id: str, user_id: str):
         # 確認待ちとして保存（まだ登録しない）
         pending_calendar_events[user_id] = events
 
+        truncated_count = sum(1 for e in events if e.get("truncated"))
         lines = [f"📅 {len(events)}件の予定を検出しました。\n内容を確認して「はい」で登録、「キャンセル」で中止してください。\n"]
         for e in events[:20]:
+            prefix = "⚠️" if e.get("truncated") else "・"
             if e.get("all_day"):
-                lines.append(f"・{e['date']} {e['summary']}（終日）")
+                lines.append(f"{prefix} {e['date']} {e['summary']}（終日）")
             else:
-                lines.append(f"・{e['date']} {e['start_time']} {e['summary']}")
+                lines.append(f"{prefix} {e['date']} {e['start_time']} {e['summary']}")
         if len(events) > 20:
             lines.append(f"...他 {len(events) - 20} 件")
+        if truncated_count:
+            lines.append(f"\n⚠️ {truncated_count}件は名前が見切れています。登録後に手動で修正してください。")
 
         line_service.push_message(user_id, "\n".join(lines))
 

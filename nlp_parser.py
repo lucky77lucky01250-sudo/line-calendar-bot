@@ -179,12 +179,13 @@ def parse_calendar_image(image_data: bytes, media_type: str = "image/jpeg") -> l
 
 JSON配列のみを返してください（コードブロック不要、余分なテキスト不要）:
 [
-  {{"summary": "予定名", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "all_day": false}},
-  {{"summary": "終日予定名", "date": "YYYY-MM-DD", "start_time": "", "end_time": "", "all_day": true}}
+  {{"summary": "予定名", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "all_day": false, "truncated": false}},
+  {{"summary": "終日予定名…", "date": "YYYY-MM-DD", "start_time": "", "end_time": "", "all_day": true, "truncated": true}}
 ]
 
 厳守するルール:
-- 画像から明確に読み取れる予定のみ含める（不明瞭な文字は推測しない）
+- 画像から明確に読み取れる文字のみ使う（不明瞭・見切れた文字は推測しない）
+- テキストが途中で切れている場合はsummaryの末尾に「…」を付け、truncated: true にする
 - {today}より前の日付の予定は絶対に含めない
 - 日付は画像に表示されている日付を正確に読む（年は{today[:4]}年として扱う）
 - 終日予定・複数日イベントはall_day: true、start_time・end_timeは空文字
