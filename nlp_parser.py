@@ -143,12 +143,8 @@ def parse_schedule_text(text: str) -> dict | None:
 
     data = json.loads(response_text)
 
-    start_dt = datetime.strptime(
-        f"{data['date']} {data['start_time']}", "%Y-%m-%d %H:%M"
-    ).replace(tzinfo=tz)
-    end_dt = datetime.strptime(
-        f"{data['date']} {data['end_time']}", "%Y-%m-%d %H:%M"
-    ).replace(tzinfo=tz)
+    start_dt = tz.localize(datetime.strptime(f"{data['date']} {data['start_time']}", "%Y-%m-%d %H:%M"))
+    end_dt = tz.localize(datetime.strptime(f"{data['date']} {data['end_time']}", "%Y-%m-%d %H:%M"))
     if end_dt <= start_dt:
         end_dt = start_dt + timedelta(hours=1)
 

@@ -117,8 +117,8 @@ def _register_pending_events(user_id: str, reply_token: str):
             if e.get("all_day"):
                 result = calendar_service.create_allday_event(e["summary"], e["date"])
             else:
-                start_dt = datetime.strptime(f"{e['date']} {e['start_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
-                end_dt = datetime.strptime(f"{e['date']} {e['end_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+                start_dt = tz.localize(datetime.strptime(f"{e['date']} {e['start_time']}", "%Y-%m-%d %H:%M"))
+                end_dt = tz.localize(datetime.strptime(f"{e['date']} {e['end_time']}", "%Y-%m-%d %H:%M"))
                 result = calendar_service.create_event(e["summary"], start_dt, end_dt)
             added.append(e)
             if e.get("truncated"):
@@ -243,8 +243,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 start_time = parsed.get("start_time", "09:00")
                 end_time = parsed.get("end_time", "10:00")
 
-                new_start = datetime.strptime(f"{date_str} {start_time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
-                new_end = datetime.strptime(f"{date_str} {end_time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+                new_start = tz.localize(datetime.strptime(f"{date_str} {start_time}", "%Y-%m-%d %H:%M"))
+                new_end = tz.localize(datetime.strptime(f"{date_str} {end_time}", "%Y-%m-%d %H:%M"))
 
                 target_event = next(
                     (e for e in user_pending if target_summary in e.get("summary", "")),
@@ -269,7 +269,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         if intent == "availability_check":
             try:
                 tz = pytz.timezone(TIMEZONE)
-                target_dt = datetime.fromisoformat(parsed["target_datetime"]).replace(tzinfo=tz)
+                target_dt = tz.localize(datetime.fromisoformat(parsed["target_datetime"]).replace(tzinfo=None))
                 duration = int(parsed.get("duration_minutes", 60))
                 result, allday_events = calendar_service.check_availability(target_dt, duration)
 
