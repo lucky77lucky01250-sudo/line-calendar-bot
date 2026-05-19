@@ -212,14 +212,18 @@ def update_event_time(event_id: str, new_start: datetime, new_end: datetime) -> 
     return service.events().patch(calendarId=CALENDAR_ID, eventId=event_id, body=body).execute()
 
 
-def create_allday_event(summary: str, date_str: str, description: str = "") -> dict:
-    """終日イベントを作成する"""
+def create_allday_event(summary: str, date_str: str, end_date_str: str | None = None, description: str = "") -> dict:
+    """終日イベントを作成する。end_date_str は排他的終了日（複数日イベントは最終日+1日）"""
     service = _get_service()
+    if end_date_str is None:
+        # 単日: end は start の翌日（Google Calendar の仕様）
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        end_date_str = (d + timedelta(days=1)).strftime("%Y-%m-%d")
     event = {
         "summary": summary,
         "description": description,
         "start": {"date": date_str},
-        "end": {"date": date_str},
+        "end": {"date": end_date_str},
     }
     return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 

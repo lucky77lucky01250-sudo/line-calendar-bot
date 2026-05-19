@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -115,7 +115,13 @@ def _register_pending_events(user_id: str, reply_token: str):
     for e in events:
         try:
             if e.get("all_day"):
-                result = calendar_service.create_allday_event(e["summary"], e["date"])
+                raw_end = e.get("end_date", "")
+                # end_date は inclusive 最終日なので +1日して exclusive に変換
+                if raw_end:
+                    exc_end = (datetime.strptime(raw_end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+                else:
+                    exc_end = None
+                result = calendar_service.create_allday_event(e["summary"], e["date"], exc_end)
             else:
                 start_dt = tz.localize(datetime.strptime(f"{e['date']} {e['start_time']}", "%Y-%m-%d %H:%M"))
                 end_dt = tz.localize(datetime.strptime(f"{e['date']} {e['end_time']}", "%Y-%m-%d %H:%M"))
