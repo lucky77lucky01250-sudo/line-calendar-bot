@@ -9,3 +9,7 @@ dist/
 build/
 token.json
 credentials.json
+client_secret.json
+oauth_credentials.json
+get_refresh_token.py
+render.env
