@@ -507,8 +507,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     line_service.reply_or_push(reply_token, user_id,
                         "変更後の日時を教えてください。\n例：「MTGを明日15時に変更して」")
                     continue
-                date_str = params["date"] or None
-                raw_events = calendar_service.search_events_by_keyword(keyword, date_str)
+                # 変更の場合、dateは新しい日付なので検索には使わない（現在の日付でイベントを探す）
+                raw_events = calendar_service.search_events_by_keyword(keyword, None)
                 if not raw_events:
                     line_service.reply_or_push(reply_token, user_id, f"「{keyword}」に一致する予定が見つかりませんでした。")
                     continue
