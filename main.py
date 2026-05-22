@@ -53,12 +53,12 @@ def _build_event_candidate(event: dict) -> dict:
     }
 
 
-def _reply_candidate_list(reply_token: str, candidates: list[dict], action: str) -> None:
+def _reply_candidate_list(reply_token: str, user_id: str, candidates: list[dict], action: str) -> None:
     verb = "削除" if action == "delete" else "変更"
     lines = [f"複数の候補が見つかりました。{verb}する予定の番号を送ってください："]
     for i, c in enumerate(candidates, 1):
         lines.append(f"{i}. {c['summary']}（{c['display']}）")
-    line_service.reply_message(reply_token, "\n".join(lines))
+    line_service.reply_or_push(reply_token, user_id, "\n".join(lines))
 
 
 def send_morning_report():
@@ -133,7 +133,7 @@ def _register_pending_events(user_id: str, reply_token: str):
     events = state_store.get_state(KEY_CALENDAR, user_id)
     state_store.del_state(KEY_CALENDAR, user_id)
     if not events:
-        line_service.reply_message(reply_token, "登録する予定がありません。")
+        line_service.reply_or_push(reply_token, user_id, "登録する予定がありません。")
         return
 
     tz = pytz.timezone(TIMEZONE)
@@ -169,7 +169,7 @@ def _register_pending_events(user_id: str, reply_token: str):
     lines = [f"✅ {len(added)}件の予定をGoogleカレンダーに登録しました！"]
     if failed:
         lines.append(f"⚠️ {len(failed)}件の登録に失敗しました")
-    line_service.reply_message(reply_token, "\n".join(lines))
+    line_service.reply_or_push(reply_token, user_id, "\n".join(lines))
 
     if truncated_fixes:
         state_store.set_state(KEY_TRUNCATED, user_id, truncated_fixes)
@@ -208,8 +208,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
         # 画像メッセージ処理
         if isinstance(event.message, ImageMessageContent):
-            line_service.reply_message(
+            line_service.reply_or_push(
                 event.reply_token,
+                event.source.user_id,
                 "📷 画像を受け取りました！\nカレンダーを解析してGoogleカレンダーに登録します...\n（数秒〜十数秒かかります）"
             )
             background_tasks.add_task(_process_calendar_image, event.message.id, event.source.user_id)
@@ -232,12 +233,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 if user_text not in ("スキップ", "skip"):
                     try:
                         calendar_service.update_event_summary(fix["event_id"], user_text)
-                        line_service.reply_message(reply_token, f"✅ 「{user_text}」に更新しました")
+                        line_service.reply_or_push(reply_token, user_id, f"✅ 「{user_text}」に更新しました")
                     except Exception as ex:
                         logger.error(f"イベント名更新エラー: {ex}")
-                        line_service.reply_message(reply_token, "更新に失敗しました。スキップします。")
+                        line_service.reply_or_push(reply_token, user_id, "更新に失敗しました。スキップします。")
                 else:
-                    line_service.reply_message(reply_token, "スキップしました。")
+                    line_service.reply_or_push(reply_token, user_id, "スキップしました。")
                 if fixes:
                     state_store.set_state(KEY_TRUNCATED, user_id, fixes)
                     _ask_next_truncated_fix(user_id)
@@ -253,7 +254,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 continue
             elif user_text in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
                 state_store.del_state(KEY_CALENDAR, user_id)
-                line_service.reply_message(reply_token, "キャンセルしました。")
+                line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 continue
 
         # 削除確認待ち
@@ -264,17 +265,17 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     try:
                         calendar_service.delete_event(candidates[0]["id"])
                         state_store.del_state(KEY_DELETE, user_id)
-                        line_service.reply_message(reply_token, f"🗑️ 「{candidates[0]['summary']}」を削除しました。")
+                        line_service.reply_or_push(reply_token, user_id, f"🗑️ 「{candidates[0]['summary']}」を削除しました。")
                     except Exception as ex:
                         logger.error(f"削除エラー: {ex}")
                         state_store.del_state(KEY_DELETE, user_id)
-                        line_service.reply_message(reply_token, "削除に失敗しました。")
+                        line_service.reply_or_push(reply_token, user_id, "削除に失敗しました。")
                 elif user_text in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
                     state_store.del_state(KEY_DELETE, user_id)
-                    line_service.reply_message(reply_token, "キャンセルしました。")
+                    line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 else:
                     c = candidates[0]
-                    line_service.reply_message(reply_token,
+                    line_service.reply_or_push(reply_token, user_id,
                         f"「{c['summary']}（{c['display']}）」を削除しますか？\n「はい」または「キャンセル」で返答してください。")
                 continue
             else:
@@ -282,13 +283,13 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     selected = [candidates[int(user_text) - 1]]
                     state_store.set_state(KEY_DELETE, user_id, selected)
                     c = selected[0]
-                    line_service.reply_message(reply_token,
+                    line_service.reply_or_push(reply_token, user_id,
                         f"「{c['summary']}（{c['display']}）」を削除しますか？\n「はい」または「キャンセル」で返答してください。")
                 elif user_text in ("キャンセル", "cancel", "中止", "やめる"):
                     state_store.del_state(KEY_DELETE, user_id)
-                    line_service.reply_message(reply_token, "キャンセルしました。")
+                    line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 else:
-                    _reply_candidate_list(reply_token, candidates, "delete")
+                    _reply_candidate_list(reply_token, user_id, candidates, "delete")
                 continue
 
         # 変更確認待ち
@@ -299,7 +300,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             if len(candidates) == 1:
                 if user_text in ("はい", "yes", "YES", "変更", "OK", "ok"):
                     try:
-                        tz = pytz.timezone(TIMEZONE)
                         result = calendar_service.update_event_datetime(
                             candidates[0]["id"],
                             new_date=params.get("date") or None,
@@ -315,18 +315,18 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                             time_disp = f"{s.strftime('%m/%d(%a) %H:%M')}〜{e.strftime('%H:%M')}"
                         else:
                             time_disp = f"{start_raw}（終日）"
-                        line_service.reply_message(reply_token,
+                        line_service.reply_or_push(reply_token, user_id,
                             f"✅ 予定を変更しました！\n📌 {result.get('summary', candidates[0]['summary'])}\n🕐 {time_disp}")
                     except Exception as ex:
                         logger.error(f"変更エラー: {ex}")
                         state_store.del_state(KEY_UPDATE, user_id)
-                        line_service.reply_message(reply_token, "変更に失敗しました。")
+                        line_service.reply_or_push(reply_token, user_id, "変更に失敗しました。")
                 elif user_text in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
                     state_store.del_state(KEY_UPDATE, user_id)
-                    line_service.reply_message(reply_token, "キャンセルしました。")
+                    line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 else:
                     c = candidates[0]
-                    line_service.reply_message(reply_token,
+                    line_service.reply_or_push(reply_token, user_id,
                         f"「{c['summary']}（{c['display']}）」を変更しますか？\n「はい」または「キャンセル」で返答してください。")
                 continue
             else:
@@ -334,13 +334,13 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     selected = [candidates[int(user_text) - 1]]
                     state_store.set_state(KEY_UPDATE, user_id, {"candidates": selected, "params": params})
                     c = selected[0]
-                    line_service.reply_message(reply_token,
+                    line_service.reply_or_push(reply_token, user_id,
                         f"「{c['summary']}（{c['display']}）」を変更しますか？\n「はい」または「キャンセル」で返答してください。")
                 elif user_text in ("キャンセル", "cancel", "中止", "やめる"):
                     state_store.del_state(KEY_UPDATE, user_id)
-                    line_service.reply_message(reply_token, "キャンセルしました。")
+                    line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 else:
-                    _reply_candidate_list(reply_token, candidates, "update")
+                    _reply_candidate_list(reply_token, user_id, candidates, "update")
                 continue
 
         # 保留中の終日イベントを取得（あれば意図判定に渡す）
@@ -352,7 +352,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             logger.info(f"intent: {intent}")
         except Exception as e:
             logger.error(f"intent解析エラー: {e}")
-            line_service.reply_message(reply_token, "メッセージの解析に失敗しました。もう一度送ってみてください。")
+            line_service.reply_or_push(reply_token, user_id, "メッセージの解析に失敗しました。もう一度送ってみてください。")
             continue
 
         # 終日予定の時間更新
@@ -380,10 +380,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     f"📌 {target_event.get('summary', target_summary)}\n"
                     f"🕐 {new_start.strftime('%m/%d(%a) %H:%M')}〜{new_end.strftime('%H:%M')}"
                 )
-                line_service.reply_message(reply_token, reply_text)
+                line_service.reply_or_push(reply_token, user_id, reply_text)
             except Exception as e:
                 logger.error(f"時間更新エラー: {e}")
-                line_service.reply_message(reply_token, "予定の更新に失敗しました。「予定名 開始時間〜終了時間」の形式で送ってください。")
+                line_service.reply_or_push(reply_token, user_id, "予定の更新に失敗しました。「予定名 開始時間〜終了時間」の形式で送ってください。")
             continue
 
         # 空き時間確認
@@ -399,10 +399,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 else:
                     state_store.del_state(KEY_ALLDAY, user_id)
 
-                line_service.reply_message(reply_token, result)
+                line_service.reply_or_push(reply_token, user_id, result)
             except Exception as e:
                 logger.error(f"空き確認エラー: {e}")
-                line_service.reply_message(reply_token, "空き時間の確認に失敗しました。時間を指定してもう一度送ってください。")
+                line_service.reply_or_push(reply_token, user_id, "空き時間の確認に失敗しました。時間を指定してもう一度送ってください。")
             continue
 
         # 予定一覧確認
@@ -410,10 +410,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             try:
                 period = parsed.get("period", "today")
                 report = calendar_service.build_query_report(period)
-                line_service.reply_message(reply_token, report)
+                line_service.reply_or_push(reply_token, user_id, report)
             except Exception as e:
                 logger.error(f"予定取得エラー: {e}")
-                line_service.reply_message(reply_token, "予定の取得に失敗しました。しばらく後で再試行してください。")
+                line_service.reply_or_push(reply_token, user_id, "予定の取得に失敗しました。しばらく後で再試行してください。")
             continue
 
         # 予定登録
@@ -421,8 +421,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             try:
                 schedule = nlp_parser.parse_schedule_text(user_text)
                 if schedule is None:
-                    line_service.reply_message(
+                    line_service.reply_or_push(
                         reply_token,
+                        user_id,
                         "予定を読み取れませんでした。\n例：「5/20 15時 田中さんとMTG 1時間」のように送ってください。",
                     )
                     continue
@@ -440,10 +441,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     f"📌 {schedule['summary']}\n"
                     f"🕐 {start_str}〜{end_str}"
                 )
-                line_service.reply_message(reply_token, reply_text)
+                line_service.reply_or_push(reply_token, user_id, reply_text)
             except Exception as e:
                 logger.error(f"予定登録エラー: {e}")
-                line_service.reply_message(reply_token, "予定の登録に失敗しました。しばらく後で再試行してください。")
+                line_service.reply_or_push(reply_token, user_id, "予定の登録に失敗しました。しばらく後で再試行してください。")
             continue
 
         # 予定削除
@@ -452,23 +453,23 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 keyword = parsed.get("summary", "")
                 date_str = parsed.get("date", "") or None
                 if not keyword:
-                    line_service.reply_message(reply_token, "削除したい予定名を教えてください。")
+                    line_service.reply_or_push(reply_token, user_id, "削除したい予定名を教えてください。")
                     continue
                 raw_events = calendar_service.search_events_by_keyword(keyword, date_str)
                 if not raw_events:
-                    line_service.reply_message(reply_token, f"「{keyword}」に一致する予定が見つかりませんでした。")
+                    line_service.reply_or_push(reply_token, user_id, f"「{keyword}」に一致する予定が見つかりませんでした。")
                     continue
                 candidates = [_build_event_candidate(e) for e in raw_events]
                 state_store.set_state(KEY_DELETE, user_id, candidates)
                 if len(candidates) == 1:
                     c = candidates[0]
-                    line_service.reply_message(reply_token,
+                    line_service.reply_or_push(reply_token, user_id,
                         f"「{c['summary']}（{c['display']}）」を削除しますか？\n「はい」または「キャンセル」で返答してください。")
                 else:
-                    _reply_candidate_list(reply_token, candidates, "delete")
+                    _reply_candidate_list(reply_token, user_id, candidates, "delete")
             except Exception as e:
                 logger.error(f"削除処理エラー: {e}")
-                line_service.reply_message(reply_token, "削除処理に失敗しました。しばらく後で再試行してください。")
+                line_service.reply_or_push(reply_token, user_id, "削除処理に失敗しました。しばらく後で再試行してください。")
             continue
 
         # 予定変更
@@ -481,33 +482,34 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     "end_time": parsed.get("end_time", ""),
                 }
                 if not keyword:
-                    line_service.reply_message(reply_token, "変更したい予定名を教えてください。")
+                    line_service.reply_or_push(reply_token, user_id, "変更したい予定名を教えてください。")
                     continue
                 if not any(params.values()):
-                    line_service.reply_message(reply_token,
+                    line_service.reply_or_push(reply_token, user_id,
                         "変更後の日時を教えてください。\n例：「MTGを明日15時に変更して」")
                     continue
                 date_str = params["date"] or None
                 raw_events = calendar_service.search_events_by_keyword(keyword, date_str)
                 if not raw_events:
-                    line_service.reply_message(reply_token, f"「{keyword}」に一致する予定が見つかりませんでした。")
+                    line_service.reply_or_push(reply_token, user_id, f"「{keyword}」に一致する予定が見つかりませんでした。")
                     continue
                 candidates = [_build_event_candidate(e) for e in raw_events]
                 state_store.set_state(KEY_UPDATE, user_id, {"candidates": candidates, "params": params})
                 if len(candidates) == 1:
                     c = candidates[0]
-                    line_service.reply_message(reply_token,
+                    line_service.reply_or_push(reply_token, user_id,
                         f"「{c['summary']}（{c['display']}）」を変更しますか？\n「はい」または「キャンセル」で返答してください。")
                 else:
-                    _reply_candidate_list(reply_token, candidates, "update")
+                    _reply_candidate_list(reply_token, user_id, candidates, "update")
             except Exception as e:
                 logger.error(f"変更処理エラー: {e}")
-                line_service.reply_message(reply_token, "変更処理に失敗しました。しばらく後で再試行してください。")
+                line_service.reply_or_push(reply_token, user_id, "変更処理に失敗しました。しばらく後で再試行してください。")
             continue
 
         # 判定不能
-        line_service.reply_message(
+        line_service.reply_or_push(
             reply_token,
+            user_id,
             "うまく読み取れませんでした。\n"
             "・予定登録：「5/20 15時 田中さんとMTG 1時間」\n"
             "・予定確認：「今日の予定は？」\n"
