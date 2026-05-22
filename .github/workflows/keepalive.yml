@@ -11,5 +11,5 @@ jobs:
     steps:
       - name: Ping Render service
         run: |
-          curl -s https://line-calendar-bot-vqr2.onrender.com/ || true
+          curl -fsS --max-time 60 --retry 3 https://line-calendar-bot-vqr2.onrender.com/ || true
           echo "Ping sent at $(date)"

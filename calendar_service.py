@@ -203,8 +203,8 @@ def search_events_by_keyword(keyword: str, date_str: str | None = None) -> list[
         search_start = tz.localize(d.replace(hour=0, minute=0, second=0, microsecond=0))
         search_end = search_start + timedelta(days=1)
     else:
-        search_start = now - timedelta(days=7)
-        search_end = now + timedelta(days=60)
+        search_start = now - timedelta(days=30)
+        search_end = now + timedelta(days=365)
 
     all_events = []
     page_token = None

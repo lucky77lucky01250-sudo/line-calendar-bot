@@ -33,3 +33,13 @@ services:
         sync: false
       - key: CRON_SECRET
         sync: false
+
+  - type: cron
+    name: keepalive-cron
+    env: python
+    buildCommand: echo "no build needed"
+    schedule: "*/14 * * * *"
+    startCommand: python keepalive_ping.py
+    envVars:
+      - key: BOT_URL
+        sync: false
