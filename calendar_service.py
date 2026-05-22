@@ -194,7 +194,7 @@ def check_availability(target_dt: datetime, duration_minutes: int = 60) -> tuple
 
 
 def search_events_by_keyword(keyword: str, date_str: str | None = None) -> list[dict]:
-    """キーワードでイベントを検索する（前後60日）"""
+    """キーワードでイベントを検索する（Python側でsubstring照合）"""
     service = _get_service()
     tz = pytz.timezone(TIMEZONE)
     now = _jst_now()
@@ -205,15 +205,32 @@ def search_events_by_keyword(keyword: str, date_str: str | None = None) -> list[
     else:
         search_start = now - timedelta(days=7)
         search_end = now + timedelta(days=60)
-    result = service.events().list(
-        calendarId=CALENDAR_ID,
-        timeMin=search_start.isoformat(),
-        timeMax=search_end.isoformat(),
-        singleEvents=True,
-        orderBy="startTime",
-        q=keyword,
-    ).execute()
-    return result.get("items", [])
+
+    all_events = []
+    page_token = None
+    while True:
+        kwargs = dict(
+            calendarId=CALENDAR_ID,
+            timeMin=search_start.isoformat(),
+            timeMax=search_end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=250,
+        )
+        if page_token:
+            kwargs["pageToken"] = page_token
+        result = service.events().list(**kwargs).execute()
+        all_events.extend(result.get("items", []))
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    # Google Calendar APIのq検索は日本語に不安定なためPython側でフィルタ
+    keyword_lower = keyword.lower()
+    return [
+        e for e in all_events
+        if keyword_lower in e.get("summary", "").lower()
+    ]
 
 
 def delete_event(event_id: str) -> None:
