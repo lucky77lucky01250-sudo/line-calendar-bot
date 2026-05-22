@@ -98,9 +98,17 @@ def parse_intent(text: str, pending_allday_events: list[dict] | None = None) -> 
 判定基準:
 - 「空いてる？」「空き時間は？」「〇時は？」→ availability_check
 - 「今日の予定」「今週は？」「スケジュール」→ schedule_query
-- 日時＋タイトルを含む → event_creation
 - 「〇〇を削除して」「〇〇を消して」「〇〇をキャンセル」→ event_deletion（dateは指定があれば変換、なければ空文字）
-- 「〇〇を〇時に変更」「〇〇を明日に変更」→ event_update（変更しない項目は空文字）
+
+★最重要★ メッセージに「変更」「修正」「移動」「更新」「日程変更」「reschedule」のいずれかが含まれる場合は必ず event_update を返す
+  - 例：「将来ビジョン新田さん　21日に変更」→ event_update（summary="将来ビジョン新田さん", date="2026-05-21"）
+  - 例：「日程変更将来ビジョン新田さん21日に変更」→ event_update（summary="将来ビジョン新田さん", date="2026-05-21"）
+  - 例：「MTGを明日15時に変更して」→ event_update（summary="MTG", date="明日の日付", start_time="15:00"）
+  - 例：「〇〇　05/21 22:00〜23:00　に変更」→ event_update（summary="〇〇", date="2026-05-21", start_time="22:00", end_time="23:00"）
+  - 変更しない項目（日付のみ変更なら start_time・end_time）は空文字にする
+
+「変更」を示す単語が一切なく、日時＋タイトルだけの場合 → event_creation
+
 - 相対日付（明日・来週など）は今日({now.strftime('%Y-%m-%d')})を基準に絶対日付へ変換
 - duration_minutesが不明な場合は60
 - target_datetimeの時間が不明な場合はそのまま記載せずperiodで返す"""

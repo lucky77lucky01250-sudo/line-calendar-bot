@@ -325,9 +325,28 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     state_store.del_state(KEY_UPDATE, user_id)
                     line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 else:
-                    c = candidates[0]
-                    line_service.reply_or_push(reply_token, user_id,
-                        f"「{c['summary']}（{c['display']}）」を変更しますか？\n「はい」または「キャンセル」で返答してください。")
+                    # 時間の追加情報として解析を試みる（例：「22時から1時間」「22時〜23時」）
+                    try:
+                        tz = pytz.timezone(TIMEZONE)
+                        base_date = params.get("date") or datetime.now(tz).strftime("%Y-%m-%d")
+                        schedule = nlp_parser.parse_schedule_text(f"{base_date} {user_text}")
+                        if schedule:
+                            new_params = dict(params)
+                            new_params["start_time"] = schedule["start"].strftime("%H:%M")
+                            new_params["end_time"] = schedule["end"].strftime("%H:%M")
+                            state_store.set_state(KEY_UPDATE, user_id, {"candidates": candidates, "params": new_params})
+                            c = candidates[0]
+                            date_disp = new_params.get("date", "")
+                            line_service.reply_or_push(reply_token, user_id,
+                                f"「{c['summary']}」を {date_disp} {new_params['start_time']}〜{new_params['end_time']} に変更しますか？\n「はい」または「キャンセル」で返答してください。")
+                        else:
+                            c = candidates[0]
+                            line_service.reply_or_push(reply_token, user_id,
+                                f"「{c['summary']}（{c['display']}）」を変更しますか？\n「はい」または「キャンセル」で返答してください。")
+                    except Exception:
+                        c = candidates[0]
+                        line_service.reply_or_push(reply_token, user_id,
+                            f"「{c['summary']}（{c['display']}）」を変更しますか？\n「はい」または「キャンセル」で返答してください。")
                 continue
             else:
                 if user_text.isdigit() and 1 <= int(user_text) <= len(candidates):
