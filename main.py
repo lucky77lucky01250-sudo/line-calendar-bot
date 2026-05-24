@@ -256,6 +256,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 state_store.del_state(KEY_CALENDAR, user_id)
                 line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 continue
+            else:
+                line_service.reply_or_push(reply_token, user_id,
+                    "「はい」で登録、「キャンセル」で中止してください。")
+                continue
 
         # 削除確認待ち
         if state_store.has_state(KEY_DELETE, user_id):

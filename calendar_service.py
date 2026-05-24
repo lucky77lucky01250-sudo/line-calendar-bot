@@ -95,8 +95,12 @@ def build_daily_report() -> str:
         hour=23, minute=59, second=59, microsecond=0
     )
     tomorrow_start = today_end
-    week_events = get_events(tomorrow_start, week_end)
     lines.append(f"📆 【今週の残り予定】〜{week_end.strftime('%m/%d(%a)')}")
+    if tomorrow_start >= week_end:
+        # 日曜日は今週の残りがないのでスキップ
+        week_events = []
+    else:
+        week_events = get_events(tomorrow_start, week_end)
     if week_events:
         prev_date = None
         for e in week_events:
@@ -250,7 +254,19 @@ def update_event_datetime(
     current = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
     all_day = _is_allday(current)
 
-    if all_day:
+    if all_day and new_start_time:
+        # 終日イベントに時間が指定された場合は時間付きイベントに変換
+        target_date = new_date or current["start"]["date"]
+        end_time = new_end_time or (
+            datetime.strptime(new_start_time, "%H:%M") + timedelta(hours=1)
+        ).strftime("%H:%M")
+        upd_start = tz.localize(datetime.strptime(f"{target_date} {new_start_time}", "%Y-%m-%d %H:%M"))
+        upd_end = tz.localize(datetime.strptime(f"{target_date} {end_time}", "%Y-%m-%d %H:%M"))
+        body = {
+            "start": {"dateTime": upd_start.isoformat(), "timeZone": TIMEZONE},
+            "end": {"dateTime": upd_end.isoformat(), "timeZone": TIMEZONE},
+        }
+    elif all_day:
         target_date = new_date or current["start"]["date"]
         d = datetime.strptime(target_date, "%Y-%m-%d")
         body = {
