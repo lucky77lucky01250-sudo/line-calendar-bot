@@ -197,6 +197,49 @@ def check_availability(target_dt: datetime, duration_minutes: int = 60) -> tuple
     return "\n".join(lines), allday_events
 
 
+def find_duplicates(events: list[dict]) -> set[int]:
+    """検出された予定リストのうち既存カレンダーと重複するもののインデックスを返す"""
+    if not events:
+        return set()
+
+    service = _get_service()
+    tz = pytz.timezone(TIMEZONE)
+
+    dates = [e["date"] for e in events if "date" in e]
+    if not dates:
+        return set()
+
+    min_date, max_date = min(dates), max(dates)
+    range_start = tz.localize(datetime.strptime(min_date, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0))
+    range_end = tz.localize(datetime.strptime(max_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=0))
+
+    result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=range_start.isoformat(),
+        timeMax=range_end.isoformat(),
+        singleEvents=True,
+        maxResults=500,
+    ).execute()
+
+    existing_by_date: dict[str, list[str]] = {}
+    for e in result.get("items", []):
+        date_key = e["start"].get("date") or e["start"].get("dateTime", "")[:10]
+        existing_by_date.setdefault(date_key, []).append(e.get("summary", "").lower())
+
+    duplicates: set[int] = set()
+    for i, event in enumerate(events):
+        date = event.get("date", "")
+        summary_lower = event.get("summary", "").lower().rstrip("…").strip()
+        if not summary_lower:
+            continue
+        for title in existing_by_date.get(date, []):
+            if summary_lower in title or title in summary_lower:
+                duplicates.add(i)
+                break
+
+    return duplicates
+
+
 def search_events_by_keyword(keyword: str, date_str: str | None = None) -> list[dict]:
     """キーワードでイベントを検索する（Python側でsubstring照合）"""
     service = _get_service()

@@ -106,20 +106,38 @@ def _process_calendar_image(message_id: str, user_id: str):
             line_service.push_message(user_id, "📅 予定が見つかりませんでした。TimeTreeのカレンダー画面を送ってください。")
             return
 
+        # 重複チェックして各イベントにフラグを付ける
+        duplicate_indices = calendar_service.find_duplicates(events)
+        for i, e in enumerate(events):
+            e["duplicate"] = i in duplicate_indices
+
         state_store.set_state(KEY_CALENDAR, user_id, events)
 
-        truncated_count = sum(1 for e in events if e.get("truncated"))
-        lines = [f"📅 {len(events)}件の予定を検出しました。\n内容を確認して「はい」で登録、「キャンセル」で中止してください。\n"]
+        new_count = sum(1 for e in events if not e.get("duplicate"))
+        dup_count = len(duplicate_indices)
+        truncated_count = sum(1 for e in events if e.get("truncated") and not e.get("duplicate"))
+
+        lines = [f"📅 {len(events)}件の予定を検出しました。（✅新規 / 🔄重複スキップ / ⚠️名前見切れ）\n「はい」で登録、「キャンセル」で中止してください。\n"]
         for e in events[:20]:
-            prefix = "⚠️" if e.get("truncated") else "・"
-            if e.get("all_day"):
-                lines.append(f"{prefix} {e['date']} {e['summary']}（終日）")
+            if e.get("duplicate"):
+                prefix = "🔄"
+            elif e.get("truncated"):
+                prefix = "⚠️"
             else:
-                lines.append(f"{prefix} {e['date']} {e['start_time']} {e['summary']}")
+                prefix = "✅"
+            if e.get("all_day"):
+                line = f"{prefix} {e['date']} {e['summary']}（終日）"
+            else:
+                line = f"{prefix} {e['date']} {e['start_time']} {e['summary']}"
+            if e.get("duplicate"):
+                line += " ← 重複・スキップ"
+            lines.append(line)
         if len(events) > 20:
             lines.append(f"...他 {len(events) - 20} 件")
         if truncated_count:
             lines.append(f"\n⚠️ {truncated_count}件は名前が見切れています。登録後に手動で修正してください。")
+        if new_count == 0:
+            lines.append("\n※ 新規登録する予定はありません。")
 
         line_service.push_message(user_id, "\n".join(lines))
 
@@ -136,11 +154,20 @@ def _register_pending_events(user_id: str, reply_token: str):
         line_service.reply_or_push(reply_token, user_id, "登録する予定がありません。")
         return
 
+    # 重複としてマークされた予定はスキップ
+    target_events = [e for e in events if not e.get("duplicate")]
+    dup_count = len(events) - len(target_events)
+
+    if not target_events:
+        line_service.reply_or_push(reply_token, user_id,
+            f"🔄 全{len(events)}件が既にカレンダーに存在するためスキップしました。")
+        return
+
     tz = pytz.timezone(TIMEZONE)
     added, failed = [], []
     truncated_fixes = []
 
-    for e in events:
+    for e in target_events:
         try:
             if e.get("all_day"):
                 raw_end = e.get("end_date", "")
@@ -167,6 +194,8 @@ def _register_pending_events(user_id: str, reply_token: str):
             failed.append(e)
 
     lines = [f"✅ {len(added)}件の予定をGoogleカレンダーに登録しました！"]
+    if dup_count:
+        lines.append(f"🔄 {dup_count}件は既存と重複のためスキップしました")
     if failed:
         lines.append(f"⚠️ {len(failed)}件の登録に失敗しました")
     line_service.reply_or_push(reply_token, user_id, "\n".join(lines))
