@@ -198,7 +198,8 @@ def check_availability(target_dt: datetime, duration_minutes: int = 60) -> tuple
 
 
 def find_duplicates(events: list[dict]) -> set[int]:
-    """検出された予定リストのうち既存カレンダーと重複するもののインデックスを返す"""
+    """検出された予定リストのうち既存カレンダーと重複するもののインデックスを返す。
+    日本の祝日カレンダーなど全カレンダーを横断してチェックする。"""
     if not events:
         return set()
 
@@ -213,18 +214,25 @@ def find_duplicates(events: list[dict]) -> set[int]:
     range_start = tz.localize(datetime.strptime(min_date, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0))
     range_end = tz.localize(datetime.strptime(max_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=0))
 
-    result = service.events().list(
-        calendarId=CALENDAR_ID,
-        timeMin=range_start.isoformat(),
-        timeMax=range_end.isoformat(),
-        singleEvents=True,
-        maxResults=500,
-    ).execute()
+    # 全カレンダーIDを取得（祝日カレンダーなども含む）
+    cal_list = service.calendarList().list().execute()
+    calendar_ids = [cal["id"] for cal in cal_list.get("items", [])]
 
     existing_by_date: dict[str, list[str]] = {}
-    for e in result.get("items", []):
-        date_key = e["start"].get("date") or e["start"].get("dateTime", "")[:10]
-        existing_by_date.setdefault(date_key, []).append(e.get("summary", "").lower())
+    for cal_id in calendar_ids:
+        try:
+            result = service.events().list(
+                calendarId=cal_id,
+                timeMin=range_start.isoformat(),
+                timeMax=range_end.isoformat(),
+                singleEvents=True,
+                maxResults=500,
+            ).execute()
+            for e in result.get("items", []):
+                date_key = e["start"].get("date") or e["start"].get("dateTime", "")[:10]
+                existing_by_date.setdefault(date_key, []).append(e.get("summary", "").lower())
+        except Exception:
+            pass  # アクセス不可のカレンダーはスキップ
 
     duplicates: set[int] = set()
     for i, event in enumerate(events):
