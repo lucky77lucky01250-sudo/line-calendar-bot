@@ -46,13 +46,14 @@ def get_events(start_dt: datetime, end_dt: datetime, filter_by_start: bool = Fal
     ).execute()
     events = result.get("items", [])
     if filter_by_start:
-        tz = pytz.timezone(TIMEZONE)
         filtered = []
         for e in events:
             if _is_allday(e):
-                # 終日イベントは date フィールドで判定
-                event_date = e["start"]["date"]
-                if start_dt.strftime("%Y-%m-%d") <= event_date < end_dt.strftime("%Y-%m-%d"):
+                # 複数日終日イベント対応：当日がイベント期間内に含まれるか判定
+                event_start_date = e["start"]["date"]
+                event_end_date = e["end"]["date"]  # exclusive
+                query_date = start_dt.strftime("%Y-%m-%d")
+                if event_start_date <= query_date < event_end_date:
                     filtered.append(e)
             else:
                 event_start = datetime.fromisoformat(e["start"]["dateTime"])
@@ -64,6 +65,27 @@ def get_events(start_dt: datetime, end_dt: datetime, filter_by_start: bool = Fal
 
 def _is_allday(event: dict) -> bool:
     return "date" in event["start"] and "dateTime" not in event["start"]
+
+
+def _expand_events_by_date(events: list[dict], first_date: str, last_date: str) -> list[tuple[str, dict]]:
+    """イベントを (date_str, event) に展開する。複数日終日イベントは各日分を生成する。
+    first_date, last_date: 表示範囲の最初・最後の日付 (YYYY-MM-DD, inclusive)
+    """
+    pairs: list[tuple[str, dict]] = []
+    last_excl = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    for e in events:
+        if _is_allday(e):
+            ev_start = e["start"]["date"]
+            ev_end = e["end"]["date"]  # exclusive
+            d = datetime.strptime(max(ev_start, first_date), "%Y-%m-%d")
+            stop = datetime.strptime(min(ev_end, last_excl), "%Y-%m-%d")
+            while d < stop:
+                pairs.append((d.strftime("%Y-%m-%d"), e))
+                d += timedelta(days=1)
+        else:
+            pairs.append((e["start"]["dateTime"][:10], e))
+    pairs.sort(key=lambda x: x[0])
+    return pairs
 
 
 def _format_event(event: dict) -> str:
@@ -102,10 +124,13 @@ def build_daily_report() -> str:
     else:
         week_events = get_events(tomorrow_start, week_end)
     if week_events:
+        date_event_pairs = _expand_events_by_date(
+            week_events,
+            tomorrow_start.strftime("%Y-%m-%d"),
+            week_end.strftime("%Y-%m-%d"),
+        )
         prev_date = None
-        for e in week_events:
-            start_val = e["start"].get("dateTime", e["start"].get("date", ""))
-            date_str = start_val[:10]
+        for date_str, e in date_event_pairs:
             if date_str != prev_date:
                 dt = datetime.fromisoformat(date_str)
                 lines.append(f"  {dt.strftime('%m/%d(%a)')}")
@@ -144,10 +169,13 @@ def build_query_report(period: str) -> str:
         events = get_events(today_start, week_end)
         lines.append(f"📆 【今週の予定】〜{week_end.strftime('%m/%d(%a)')}")
         if events:
+            date_event_pairs = _expand_events_by_date(
+                events,
+                today_start.strftime("%Y-%m-%d"),
+                week_end.strftime("%Y-%m-%d"),
+            )
             prev_date = None
-            for e in events:
-                start_val = e["start"].get("dateTime", e["start"].get("date", ""))
-                date_str = start_val[:10]
+            for date_str, e in date_event_pairs:
                 if date_str != prev_date:
                     dt = datetime.fromisoformat(date_str)
                     lines.append(f"  {dt.strftime('%m/%d(%a)')}")
