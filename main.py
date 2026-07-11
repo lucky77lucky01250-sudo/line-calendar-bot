@@ -249,6 +249,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             continue
 
         user_text = event.message.text.strip()
+        # 確認応答（はい/キャンセル等）の判定には末尾の記号を除いた answer を使う。
+        # イベント名の入力にはそのままの user_text を使う（名前に含まれる記号を消さないため）
+        answer = user_text.rstrip("！!。．.、，,？?〜～ 　")
         reply_token = event.reply_token
         user_id = event.source.user_id
 
@@ -259,7 +262,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             fixes = state_store.get_state(KEY_TRUNCATED, user_id)
             if fixes:
                 fix = fixes.pop(0)
-                if user_text not in ("スキップ", "skip"):
+                if answer not in ("スキップ", "skip"):
                     try:
                         calendar_service.update_event_summary(fix["event_id"], user_text)
                         line_service.reply_or_push(reply_token, user_id, f"✅ 「{user_text}」に更新しました")
@@ -278,10 +281,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
         # 画像解析後の確認待ち処理
         if state_store.has_state(KEY_CALENDAR, user_id):
-            if user_text in ("はい", "yes", "YES", "登録", "OK", "ok"):
+            if answer in ("はい", "yes", "YES", "登録", "OK", "ok"):
                 _register_pending_events(user_id, reply_token)
                 continue
-            elif user_text in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
+            elif answer in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
                 state_store.del_state(KEY_CALENDAR, user_id)
                 line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 continue
@@ -294,7 +297,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         if state_store.has_state(KEY_DELETE, user_id):
             candidates = state_store.get_state(KEY_DELETE, user_id)
             if len(candidates) == 1:
-                if user_text in ("はい", "yes", "YES", "削除", "OK", "ok"):
+                if answer in ("はい", "yes", "YES", "削除", "OK", "ok"):
                     try:
                         calendar_service.delete_event(candidates[0]["id"])
                         state_store.del_state(KEY_DELETE, user_id)
@@ -303,7 +306,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                         logger.error(f"削除エラー: {ex}")
                         state_store.del_state(KEY_DELETE, user_id)
                         line_service.reply_or_push(reply_token, user_id, "削除に失敗しました。")
-                elif user_text in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
+                elif answer in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
                     state_store.del_state(KEY_DELETE, user_id)
                     line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 else:
@@ -318,7 +321,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     c = selected[0]
                     line_service.reply_or_push(reply_token, user_id,
                         f"「{c['summary']}（{c['display']}）」を削除しますか？\n「はい」または「キャンセル」で返答してください。")
-                elif user_text in ("キャンセル", "cancel", "中止", "やめる"):
+                elif answer in ("キャンセル", "cancel", "中止", "やめる"):
                     state_store.del_state(KEY_DELETE, user_id)
                     line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 else:
@@ -331,7 +334,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             candidates = update_state["candidates"]
             params = update_state["params"]
             if len(candidates) == 1:
-                if user_text in ("はい", "yes", "YES", "変更", "OK", "ok"):
+                if answer in ("はい", "yes", "YES", "変更", "OK", "ok"):
                     try:
                         result = calendar_service.update_event_datetime(
                             candidates[0]["id"],
@@ -354,7 +357,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                         logger.error(f"変更エラー: {ex}")
                         state_store.del_state(KEY_UPDATE, user_id)
                         line_service.reply_or_push(reply_token, user_id, "変更に失敗しました。")
-                elif user_text in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
+                elif answer in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
                     state_store.del_state(KEY_UPDATE, user_id)
                     line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 else:
@@ -388,12 +391,19 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     c = selected[0]
                     line_service.reply_or_push(reply_token, user_id,
                         f"「{c['summary']}（{c['display']}）」を変更しますか？\n「はい」または「キャンセル」で返答してください。")
-                elif user_text in ("キャンセル", "cancel", "中止", "やめる"):
+                elif answer in ("キャンセル", "cancel", "中止", "やめる"):
                     state_store.del_state(KEY_UPDATE, user_id)
                     line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
                 else:
                     _reply_candidate_list(reply_token, user_id, candidates, "update")
                 continue
+
+        # 確認待ちが無いのに「はい」等の確認応答が来た場合（期限切れなど）は案内を返す
+        if answer in ("はい", "yes", "YES", "登録", "OK", "ok",
+                      "いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
+            line_service.reply_or_push(reply_token, user_id,
+                "確認待ちの予定が見つかりません。\n（確認待ちは2時間で期限切れになります）\nお手数ですが、もう一度画像を送ってください。")
+            continue
 
         # 保留中の終日イベントを取得（あれば意図判定に渡す）
         user_pending = state_store.get_state(KEY_ALLDAY, user_id) or None

@@ -4,7 +4,7 @@ import os
 import redis
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-TTL = 1800  # 30分
+TTL = 7200  # 2時間
 
 _client: redis.Redis | None = None
 
