@@ -1,0 +1,29 @@
+name: Morning Report
+
+# 毎朝7:00 JST (22:00 UTC) にRenderの朝通知エンドポイントを叩く。
+# GitHubのschedule起動は数分〜数十分遅れるため、少し早め(21:45 UTC)に起動し
+# 22:00 UTCちょうどまで待ってから送信する。
+on:
+  schedule:
+    - cron: '45 21 * * *'
+  workflow_dispatch:        # 手動実行も可能（テスト用）
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait until 22:00 UTC (07:00 JST) and trigger
+        run: |
+          target=$(date -u -d "today 22:00" +%s)
+          now=$(date -u +%s)
+          diff=$(( target - now ))
+          # 22:00前に起動した場合のみ待機（1時間以上先なら異常なので即送信）
+          if [ "$diff" -gt 0 ] && [ "$diff" -lt 3600 ]; then
+            echo "Sleeping ${diff}s until 22:00 UTC"
+            sleep "$diff"
+          fi
+          curl -fsS --max-time 120 --retry 3 --retry-delay 30 --retry-all-errors \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            https://line-calendar-bot-vqr2.onrender.com/cron/morning-report
+          echo "Morning report triggered at $(date -u)"
