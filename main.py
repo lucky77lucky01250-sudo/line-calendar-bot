@@ -30,6 +30,11 @@ app = FastAPI(title="LINE Calendar Bot")
 KEY_ALLDAY = "allday"
 KEY_DELETE = "delete"
 KEY_UPDATE = "event_update"
+KEY_MORNING_SENT = "morning_sent"
+
+# 朝の通知の重複防止フラグの保持時間。日付キーと組み合わせるため、
+# その日のうちに消えず翌日分と衝突しない長さにしてある。
+MORNING_SENT_TTL = 72000  # 20時間
 
 
 def _build_event_candidate(event: dict) -> dict:
@@ -58,15 +63,17 @@ def _reply_candidate_list(reply_token: str, user_id: str, candidates: list[dict]
     line_service.reply_or_push(reply_token, user_id, "\n".join(lines))
 
 
-def send_morning_report():
-    """朝の予定通知（今日・今週）"""
+def send_morning_report() -> bool:
+    """朝の予定通知（今日・今週）。送信できたかどうかを返す。"""
     try:
         logger.info("朝の予定通知を送信中...")
         report = calendar_service.build_daily_report()
         line_service.push_message(LINE_USER_ID, report)
         logger.info("朝の予定通知を送信完了")
+        return True
     except Exception as e:
         logger.error(f"朝の予定通知エラー: {e}")
+        return False
 
 
 @app.get("/")
@@ -76,12 +83,26 @@ async def health_check():
 
 @app.post("/cron/morning-report")
 async def cron_morning_report(request: Request):
-    """Railway Cronから7時に呼び出される朝の通知エンドポイント"""
+    """朝の通知エンドポイント。
+
+    GitHub Actions の schedule は最大で数時間ずれるため、外部から1日に複数回
+    叩かれる前提にしてある。最初に到達したものだけが送信し、以降はスキップする。
+    送信に失敗した場合はフラグを戻して、後続のトリガーで再試行できるようにする。
+    """
     auth = request.headers.get("Authorization", "")
     if not CRON_SECRET or auth != f"Bearer {CRON_SECRET}":
         raise HTTPException(status_code=401, detail="Unauthorized")
-    send_morning_report()
-    return {"status": "ok"}
+
+    today = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d")
+    if not state_store.claim_once(KEY_MORNING_SENT, today, MORNING_SENT_TTL):
+        logger.info(f"朝の通知は送信済みのためスキップ: {today}")
+        return {"status": "skipped", "date": today}
+
+    if not send_morning_report():
+        state_store.del_state(KEY_MORNING_SENT, today)
+        raise HTTPException(status_code=500, detail="朝の通知の送信に失敗しました")
+
+    return {"status": "ok", "date": today}
 
 
 @app.post("/webhook")

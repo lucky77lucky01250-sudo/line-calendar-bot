@@ -1,12 +1,24 @@
 name: Morning Report
 
 # 毎朝7:00 JST (22:00 UTC) にRenderの朝通知エンドポイントを叩く。
-# GitHubのschedule起動は数分〜数十分遅れるため、少し早め(21:45 UTC)に起動し
-# 22:00 UTCちょうどまで待ってから送信する。
+#
+# GitHubのschedule起動は混雑時に数十分〜数時間ずれる（実測で10:04着の日があった）。
+# 遅延の大きさは実行ごとに独立しているため、時刻をずらして4回仕掛け、
+# 最も早く実際に動いたものが送信する形にしている。
+# エンドポイント側は日付単位で冪等（1日1回しか送らない）ので、
+# 残りの3回が到達しても二重送信にはならない。
 on:
   schedule:
-    - cron: '45 21 * * *'
+    - cron: '45 21 * * *'   # 06:45 JST 起動 → 07:00まで待って送信
+    - cron: '5 22 * * *'    # 07:05 JST
+    - cron: '20 22 * * *'   # 07:20 JST
+    - cron: '45 22 * * *'   # 07:45 JST
   workflow_dispatch:        # 手動実行も可能（テスト用）
+
+# 同時に走っても無駄なだけなので、後発は前のを待たずに捨てる
+concurrency:
+  group: morning-report
+  cancel-in-progress: false
 
 jobs:
   send:
@@ -22,8 +34,10 @@ jobs:
             echo "Sleeping ${diff}s until 22:00 UTC"
             sleep "$diff"
           fi
-          curl -fsS --max-time 120 --retry 3 --retry-delay 30 --retry-all-errors \
+          # 送信済みの日は {"status":"skipped"} が返る（正常・200）
+          response=$(curl -fsS --max-time 120 --retry 3 --retry-delay 30 --retry-all-errors \
             -X POST \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            https://line-calendar-bot-vqr2.onrender.com/cron/morning-report
-          echo "Morning report triggered at $(date -u)"
+            https://line-calendar-bot-vqr2.onrender.com/cron/morning-report)
+          echo "Response: $response"
+          echo "Triggered at $(date -u)"
