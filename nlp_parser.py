@@ -1,5 +1,4 @@
 from __future__ import annotations
-import base64
 import os
 import json
 import re
@@ -179,55 +178,3 @@ def parse_schedule_text(text: str) -> dict | None:
         "start": start_dt,
         "end": end_dt,
     }
-
-
-def parse_calendar_image(image_data: bytes, media_type: str = "image/jpeg") -> list[dict]:
-    """
-    カレンダー画像から今日以降の予定を抽出する。
-    戻り値: [{"summary": str, "date": "YYYY-MM-DD", "start_time": str, "end_time": str, "all_day": bool}]
-    """
-    tz = pytz.timezone(TIMEZONE)
-    today = datetime.now(tz).strftime("%Y-%m-%d")
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    image_b64 = base64.b64encode(image_data).decode("utf-8")
-
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": media_type, "data": image_b64}
-                },
-                {
-                    "type": "text",
-                    "text": f"""このTimeTreeカレンダー画像を注意深く解析し、{today}以降の予定のみ抽出してください。
-今日の日付: {today}
-
-JSON配列のみを返してください（コードブロック不要、余分なテキスト不要）:
-[
-  {{"summary": "予定名", "date": "YYYY-MM-DD", "end_date": "", "start_time": "HH:MM", "end_time": "HH:MM", "all_day": false, "truncated": false}},
-  {{"summary": "終日予定名…", "date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "start_time": "", "end_time": "", "all_day": true, "truncated": true}}
-]
-
-厳守するルール:
-- 画像から明確に読み取れる文字のみ使う（不明瞭・見切れた文字は推測しない）
-- テキストが途中で切れている場合はsummaryの末尾に「…」を付け、truncated: true にする
-- {today}より前の日付の予定は絶対に含めない
-- 日付は画像に表示されている日付を正確に読む（年は{today[:4]}年として扱う）
-- 終日予定・複数日イベントはall_day: true、start_time・end_timeは空文字
-- 複数日にわたる終日予定はend_dateに最終日（inclusive）を入れ、1日のみの場合はend_dateを空文字にする
-- 時刻付き予定の終了時刻が不明な場合は開始の1時間後、end_dateは空文字
-- 祝日・六曜（先勝・友引・先負・仏滅・大安・赤口）・曜日表記は除外
-- 予定が存在しない場合は空配列 [] を返す"""
-                }
-            ]
-        }]
-    )
-
-    response_text = message.content[0].text.strip()
-    response_text = re.sub(r'^```(?:json)?\s*', '', response_text)
-    response_text = re.sub(r'\s*```$', '', response_text).strip()
-    return json.loads(response_text)

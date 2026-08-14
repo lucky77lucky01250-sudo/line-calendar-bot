@@ -1,15 +1,14 @@
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
 
-import httpx
 import pytz
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from linebot.v3.webhook import WebhookParser
-from linebot.v3.webhooks import ImageMessageContent, MessageEvent, TextMessageContent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 import calendar_service
 import line_service
@@ -29,8 +28,6 @@ app = FastAPI(title="LINE Calendar Bot")
 
 # Redisのキー定数
 KEY_ALLDAY = "allday"
-KEY_CALENDAR = "calendar"
-KEY_TRUNCATED = "truncated"
 KEY_DELETE = "delete"
 KEY_UPDATE = "event_update"
 
@@ -72,139 +69,6 @@ def send_morning_report():
         logger.error(f"朝の予定通知エラー: {e}")
 
 
-def _ask_next_truncated_fix(user_id: str):
-    """見切れ予定の修正を1件ずつ問い合わせる"""
-    fixes = state_store.get_state(KEY_TRUNCATED, user_id)
-    if not fixes:
-        state_store.del_state(KEY_TRUNCATED, user_id)
-        line_service.push_message(user_id, "✅ 全ての予定の修正が完了しました！")
-        return
-    fix = fixes[0]
-    time_label = "終日" if fix["time_str"] == "終日" else fix["time_str"]
-    line_service.push_message(
-        user_id,
-        f"✏️ 名前が見切れています\n「{fix['original_summary']}」\n"
-        f"({fix['date']} {time_label})\n\n"
-        f"正しい名前を入力してください。\n（スキップは「スキップ」）"
-    )
-
-
-def _process_calendar_image(message_id: str, user_id: str):
-    """カレンダー画像を解析し確認メッセージを送信（バックグラウンド実行）"""
-    try:
-        token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
-        with httpx.Client(timeout=60) as client:
-            resp = client.get(
-                f"https://api-data.line.me/v2/bot/message/{message_id}/content",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        image_data = resp.content
-        media_type = resp.headers.get("content-type", "image/jpeg").split(";")[0]
-
-        events = nlp_parser.parse_calendar_image(image_data, media_type)
-        if not events:
-            line_service.push_message(user_id, "📅 予定が見つかりませんでした。TimeTreeのカレンダー画面を送ってください。")
-            return
-
-        # 重複チェックして各イベントにフラグを付ける
-        duplicate_indices = calendar_service.find_duplicates(events)
-        for i, e in enumerate(events):
-            e["duplicate"] = i in duplicate_indices
-
-        state_store.set_state(KEY_CALENDAR, user_id, events)
-
-        new_count = sum(1 for e in events if not e.get("duplicate"))
-        dup_count = len(duplicate_indices)
-        truncated_count = sum(1 for e in events if e.get("truncated") and not e.get("duplicate"))
-
-        lines = [f"📅 {len(events)}件の予定を検出しました。（✅新規 / 🔄重複スキップ / ⚠️名前見切れ）\n「はい」で登録、「キャンセル」で中止してください。\n"]
-        for e in events[:20]:
-            if e.get("duplicate"):
-                prefix = "🔄"
-            elif e.get("truncated"):
-                prefix = "⚠️"
-            else:
-                prefix = "✅"
-            if e.get("all_day"):
-                line = f"{prefix} {e['date']} {e['summary']}（終日）"
-            else:
-                line = f"{prefix} {e['date']} {e['start_time']} {e['summary']}"
-            if e.get("duplicate"):
-                line += " ← 重複・スキップ"
-            lines.append(line)
-        if len(events) > 20:
-            lines.append(f"...他 {len(events) - 20} 件")
-        if truncated_count:
-            lines.append(f"\n⚠️ {truncated_count}件は名前が見切れています。登録後に手動で修正してください。")
-        if new_count == 0:
-            lines.append("\n※ 新規登録する予定はありません。")
-
-        line_service.push_message(user_id, "\n".join(lines))
-
-    except Exception as e:
-        logger.error(f"カレンダー画像処理エラー: {e}")
-        line_service.push_message(user_id, "画像の解析に失敗しました。TimeTreeのカレンダー画面を送ってください。")
-
-
-def _register_pending_events(user_id: str, reply_token: str):
-    """確認済みの予定をGoogleカレンダーに一括登録し、見切れ予定の修正フローを開始"""
-    events = state_store.get_state(KEY_CALENDAR, user_id)
-    state_store.del_state(KEY_CALENDAR, user_id)
-    if not events:
-        line_service.reply_or_push(reply_token, user_id, "登録する予定がありません。")
-        return
-
-    # 重複としてマークされた予定はスキップ
-    target_events = [e for e in events if not e.get("duplicate")]
-    dup_count = len(events) - len(target_events)
-
-    if not target_events:
-        line_service.reply_or_push(reply_token, user_id,
-            f"🔄 全{len(events)}件が既にカレンダーに存在するためスキップしました。")
-        return
-
-    tz = pytz.timezone(TIMEZONE)
-    added, failed = [], []
-    truncated_fixes = []
-
-    for e in target_events:
-        try:
-            if e.get("all_day"):
-                raw_end = e.get("end_date", "")
-                # end_date は inclusive 最終日なので +1日して exclusive に変換
-                if raw_end:
-                    exc_end = (datetime.strptime(raw_end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-                else:
-                    exc_end = None
-                result = calendar_service.create_allday_event(e["summary"], e["date"], exc_end)
-            else:
-                start_dt = tz.localize(datetime.strptime(f"{e['date']} {e['start_time']}", "%Y-%m-%d %H:%M"))
-                end_dt = tz.localize(datetime.strptime(f"{e['date']} {e['end_time']}", "%Y-%m-%d %H:%M"))
-                result = calendar_service.create_event(e["summary"], start_dt, end_dt)
-            added.append(e)
-            if e.get("truncated"):
-                truncated_fixes.append({
-                    "event_id": result["id"],
-                    "original_summary": e["summary"],
-                    "date": e["date"],
-                    "time_str": "終日" if e.get("all_day") else e.get("start_time", ""),
-                })
-        except Exception as ex:
-            logger.error(f"イベント登録失敗: {e.get('summary')} - {ex}")
-            failed.append(e)
-
-    lines = [f"✅ {len(added)}件の予定をGoogleカレンダーに登録しました！"]
-    if dup_count:
-        lines.append(f"🔄 {dup_count}件は既存と重複のためスキップしました")
-    if failed:
-        lines.append(f"⚠️ {len(failed)}件の登録に失敗しました")
-    line_service.reply_or_push(reply_token, user_id, "\n".join(lines))
-
-    if truncated_fixes:
-        state_store.set_state(KEY_TRUNCATED, user_id, truncated_fixes)
-        _ask_next_truncated_fix(user_id)
-
-
 @app.get("/")
 async def health_check():
     return {"status": "ok", "message": "LINE Calendar Bot is running"}
@@ -221,7 +85,7 @@ async def cron_morning_report(request: Request):
 
 
 @app.post("/webhook")
-async def webhook(request: Request, background_tasks: BackgroundTasks):
+async def webhook(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
 
@@ -235,16 +99,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         if not isinstance(event, MessageEvent):
             continue
 
-        # 画像メッセージ処理
-        if isinstance(event.message, ImageMessageContent):
-            line_service.reply_or_push(
-                event.reply_token,
-                event.source.user_id,
-                "📷 画像を受け取りました！\nカレンダーを解析してGoogleカレンダーに登録します...\n（数秒〜十数秒かかります）"
-            )
-            background_tasks.add_task(_process_calendar_image, event.message.id, event.source.user_id)
-            continue
-
         if not isinstance(event.message, TextMessageContent):
             continue
 
@@ -256,42 +110,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         user_id = event.source.user_id
 
         logger.info(f"受信メッセージ: {user_text}")
-
-        # 見切れ予定の名前修正
-        if state_store.has_state(KEY_TRUNCATED, user_id):
-            fixes = state_store.get_state(KEY_TRUNCATED, user_id)
-            if fixes:
-                fix = fixes.pop(0)
-                if answer not in ("スキップ", "skip"):
-                    try:
-                        calendar_service.update_event_summary(fix["event_id"], user_text)
-                        line_service.reply_or_push(reply_token, user_id, f"✅ 「{user_text}」に更新しました")
-                    except Exception as ex:
-                        logger.error(f"イベント名更新エラー: {ex}")
-                        line_service.reply_or_push(reply_token, user_id, "更新に失敗しました。スキップします。")
-                else:
-                    line_service.reply_or_push(reply_token, user_id, "スキップしました。")
-                if fixes:
-                    state_store.set_state(KEY_TRUNCATED, user_id, fixes)
-                    _ask_next_truncated_fix(user_id)
-                else:
-                    state_store.del_state(KEY_TRUNCATED, user_id)
-                    line_service.push_message(user_id, "✅ 全ての予定の修正が完了しました！")
-            continue
-
-        # 画像解析後の確認待ち処理
-        if state_store.has_state(KEY_CALENDAR, user_id):
-            if answer in ("はい", "yes", "YES", "登録", "OK", "ok"):
-                _register_pending_events(user_id, reply_token)
-                continue
-            elif answer in ("いいえ", "no", "NO", "キャンセル", "cancel", "中止", "やめる"):
-                state_store.del_state(KEY_CALENDAR, user_id)
-                line_service.reply_or_push(reply_token, user_id, "キャンセルしました。")
-                continue
-            else:
-                line_service.reply_or_push(reply_token, user_id,
-                    "「はい」で登録、「キャンセル」で中止してください。")
-                continue
 
         # 削除確認待ち
         if state_store.has_state(KEY_DELETE, user_id):

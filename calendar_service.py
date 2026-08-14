@@ -102,7 +102,6 @@ def _format_event(event: dict) -> str:
 
 def build_daily_report() -> str:
     """朝の自動通知用：今日・今週の予定"""
-    tz = pytz.timezone(TIMEZONE)
     now = _jst_now()
     lines = []
 
@@ -154,7 +153,6 @@ def build_daily_report() -> str:
 
 def build_query_report(period: str) -> str:
     """ユーザーの問い合わせ用：today または week"""
-    tz = pytz.timezone(TIMEZONE)
     now = _jst_now()
     lines = []
 
@@ -236,57 +234,6 @@ def check_availability(target_dt: datetime, duration_minutes: int = 60) -> tuple
     lines.append(EXTERNAL_CALENDAR_NOTE)
 
     return "\n".join(lines), allday_events
-
-
-def find_duplicates(events: list[dict]) -> set[int]:
-    """検出された予定リストのうち既存カレンダーと重複するもののインデックスを返す。
-    日本の祝日カレンダーなど全カレンダーを横断してチェックする。"""
-    if not events:
-        return set()
-
-    service = _get_service()
-    tz = pytz.timezone(TIMEZONE)
-
-    dates = [e["date"] for e in events if "date" in e]
-    if not dates:
-        return set()
-
-    min_date, max_date = min(dates), max(dates)
-    range_start = tz.localize(datetime.strptime(min_date, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0))
-    range_end = tz.localize(datetime.strptime(max_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=0))
-
-    # 全カレンダーIDを取得（祝日カレンダーなども含む）
-    cal_list = service.calendarList().list().execute()
-    calendar_ids = [cal["id"] for cal in cal_list.get("items", [])]
-
-    existing_by_date: dict[str, list[str]] = {}
-    for cal_id in calendar_ids:
-        try:
-            result = service.events().list(
-                calendarId=cal_id,
-                timeMin=range_start.isoformat(),
-                timeMax=range_end.isoformat(),
-                singleEvents=True,
-                maxResults=500,
-            ).execute()
-            for e in result.get("items", []):
-                date_key = e["start"].get("date") or e["start"].get("dateTime", "")[:10]
-                existing_by_date.setdefault(date_key, []).append(e.get("summary", "").lower())
-        except Exception:
-            pass  # アクセス不可のカレンダーはスキップ
-
-    duplicates: set[int] = set()
-    for i, event in enumerate(events):
-        date = event.get("date", "")
-        summary_lower = event.get("summary", "").lower().rstrip("…").strip()
-        if not summary_lower:
-            continue
-        for title in existing_by_date.get(date, []):
-            if summary_lower in title or title in summary_lower:
-                duplicates.add(i)
-                break
-
-    return duplicates
 
 
 def search_events_by_keyword(keyword: str, date_str: str | None = None) -> list[dict]:
@@ -395,14 +342,6 @@ def update_event_datetime(
     return service.events().patch(calendarId=CALENDAR_ID, eventId=event_id, body=body).execute()
 
 
-def update_event_summary(event_id: str, new_summary: str) -> dict:
-    """イベントのタイトルを更新する"""
-    service = _get_service()
-    return service.events().patch(
-        calendarId=CALENDAR_ID, eventId=event_id, body={"summary": new_summary}
-    ).execute()
-
-
 def update_event_time(event_id: str, new_start: datetime, new_end: datetime) -> dict:
     """終日イベントを時間指定イベントに更新する"""
     service = _get_service()
@@ -412,22 +351,6 @@ def update_event_time(event_id: str, new_start: datetime, new_end: datetime) -> 
         "end": {"dateTime": new_end.astimezone(tz).isoformat(), "timeZone": TIMEZONE},
     }
     return service.events().patch(calendarId=CALENDAR_ID, eventId=event_id, body=body).execute()
-
-
-def create_allday_event(summary: str, date_str: str, end_date_str: str | None = None, description: str = "") -> dict:
-    """終日イベントを作成する。end_date_str は排他的終了日（複数日イベントは最終日+1日）"""
-    service = _get_service()
-    if end_date_str is None:
-        # 単日: end は start の翌日（Google Calendar の仕様）
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        end_date_str = (d + timedelta(days=1)).strftime("%Y-%m-%d")
-    event = {
-        "summary": summary,
-        "description": description,
-        "start": {"date": date_str},
-        "end": {"date": end_date_str},
-    }
-    return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
 
 def create_event(summary: str, start_dt: datetime, end_dt: datetime, description: str = "") -> dict:
