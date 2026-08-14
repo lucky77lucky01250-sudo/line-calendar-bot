@@ -10,6 +10,10 @@ TIMEZONE = os.getenv("TIMEZONE", "Asia/Tokyo")
 CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
+# 仕事・家族の予定はTimeTreeで管理しており、このボットからは見えない。
+# 「予定なし」を全予定なしと誤読して二重予約するのを防ぐための注記。
+EXTERNAL_CALENDAR_NOTE = "⚠️ Googleカレンダーのみの表示です。仕事・家族の予定はTimeTreeをご確認ください"
+
 
 def _get_service():
     client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -140,6 +144,9 @@ def build_daily_report() -> str:
         lines.append("  予定なし")
     lines.append("")
 
+    lines.append(EXTERNAL_CALENDAR_NOTE)
+    lines.append("")
+
     lines.append("📌 予定を追加するには「日時 タイトル」で送ってください")
     lines.append("例：5/20 15時 田中さんとMTG 1時間")
     return "\n".join(lines)
@@ -184,6 +191,9 @@ def build_query_report(period: str) -> str:
         else:
             lines.append("  予定なし")
 
+    lines.append("")
+    lines.append(EXTERNAL_CALENDAR_NOTE)
+
     return "\n".join(lines)
 
 
@@ -200,7 +210,7 @@ def check_availability(target_dt: datetime, duration_minutes: int = 60) -> tuple
     end_str = end_dt.strftime("%H:%M")
 
     if not events:
-        return f"✅ {time_str}〜{end_str} は空いています！", []
+        return f"✅ {time_str}〜{end_str} は空いています！\n\n{EXTERNAL_CALENDAR_NOTE}", []
 
     allday_events = [e for e in events if _is_allday(e)]
     timed_events = [e for e in events if not _is_allday(e)]
@@ -221,6 +231,9 @@ def check_availability(target_dt: datetime, duration_minutes: int = 60) -> tuple
         lines.append("")
         lines.append("時間帯を教えてもらえれば更新します。")
         lines.append("例：「〇〇 14時〜16時」")
+
+    lines.append("")
+    lines.append(EXTERNAL_CALENDAR_NOTE)
 
     return "\n".join(lines), allday_events
 
